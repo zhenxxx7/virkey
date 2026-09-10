@@ -17,6 +17,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import androidx.core.content.ContextCompat
+import com.virkey.app.input.ConsumerState
 import com.virkey.app.input.HidDescriptor
 import com.virkey.app.input.KeyboardState
 import com.virkey.app.input.MouseReports
@@ -34,6 +35,7 @@ class BluetoothController(private val context: Context) {
     val state = mutableState.asStateFlow()
     private val handler = Handler(Looper.getMainLooper())
     private val keyboard = KeyboardState()
+    private val consumer = ConsumerState()
     private var hid: BluetoothHidDevice? = null
     private var host: BluetoothDevice? = null
     private var pendingAddress: String? = null
@@ -151,6 +153,7 @@ class BluetoothController(private val context: Context) {
             val report = when {
                 type == BluetoothHidDevice.REPORT_TYPE_INPUT && reportId == HidDescriptor.KEYBOARD_REPORT_ID -> keyboard.report()
                 type == BluetoothHidDevice.REPORT_TYPE_INPUT && reportId == HidDescriptor.MOUSE_REPORT_ID -> MouseReports.encode(mouseButtons).let { if (bootMode) it.copyOf(3) else it }
+                type == BluetoothHidDevice.REPORT_TYPE_INPUT && reportId == HidDescriptor.CONSUMER_REPORT_ID && !bootMode -> consumer.report()
                 type == BluetoothHidDevice.REPORT_TYPE_OUTPUT && reportId == HidDescriptor.KEYBOARD_REPORT_ID -> byteArrayOf(ledState)
                 else -> null
             }
@@ -173,6 +176,8 @@ class BluetoothController(private val context: Context) {
 
         override fun onSetProtocol(device: BluetoothDevice, protocol: Byte) {
             bootMode = protocol == BluetoothHidDevice.PROTOCOL_BOOT_MODE
+            // Clear all state even in boot mode, where consumer reports are not defined.
+            // Returning to report mode sends neutral reports, never old media commands.
             releaseAll()
         }
 
@@ -281,6 +286,10 @@ class BluetoothController(private val context: Context) {
 
     fun keyDown(usage: Int) { if (state.value.isConnected) sendKeyboard(keyboard.press(usage)) }
     fun keyUp(usage: Int) { sendKeyboard(keyboard.release(usage)) }
+    fun mediaDown(usage: Int) {
+        if (state.value.isConnected && !bootMode) consumer.press(usage).forEach(::sendConsumer)
+    }
+    fun mediaUp(usage: Int) { consumer.release(usage).forEach(::sendConsumer) }
     fun movePointer(dx: Int, dy: Int) { if (state.value.isConnected) MouseReports.chunked(mouseButtons, dx, dy).forEach(::sendMouse) }
     fun scroll(amount: Int) { if (state.value.isConnected && !bootMode) MouseReports.chunked(mouseButtons, 0, 0, amount).forEach(::sendMouse) }
     fun mouseDown(button: Int) {
@@ -297,11 +306,15 @@ class BluetoothController(private val context: Context) {
         sendKeyboard(keyboard.releaseAll())
         mouseButtons = 0
         sendMouse(MouseReports.encode(0))
+        sendConsumer(consumer.releaseAll())
     }
 
     // Bluetooth's boot protocol retains the mandatory keyboard/mouse IDs (unlike USB).
     private fun sendKeyboard(report: ByteArray) = send(HidDescriptor.KEYBOARD_REPORT_ID, report)
     private fun sendMouse(report: ByteArray) = send(HidDescriptor.MOUSE_REPORT_ID, if (bootMode) report.copyOf(3) else report)
+    private fun sendConsumer(report: ByteArray) {
+        if (!bootMode) send(HidDescriptor.CONSUMER_REPORT_ID, report)
+    }
     private fun send(id: Int, report: ByteArray) {
         val device = host ?: return
         if (!state.value.isConnected) return
@@ -346,6 +359,7 @@ class BluetoothController(private val context: Context) {
     fun setMessage(message: String) { mutableState.update { it.copy(statusMessage = message) } }
     private fun clearLocalInput() {
         keyboard.releaseAll()
+        consumer.releaseAll()
         mouseButtons = 0
         updateLeds(0)
     }

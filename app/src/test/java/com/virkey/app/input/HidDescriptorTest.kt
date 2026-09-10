@@ -11,7 +11,9 @@ class HidDescriptorTest {
         assertEquals(64, fields.filter { it.reportId == HidDescriptor.KEYBOARD_REPORT_ID && it.kind == INPUT }.sumOf { it.size * it.count })
         assertEquals(8, fields.filter { it.reportId == HidDescriptor.KEYBOARD_REPORT_ID && it.kind == OUTPUT }.sumOf { it.size * it.count })
         assertEquals(32, fields.filter { it.reportId == HidDescriptor.MOUSE_REPORT_ID && it.kind == INPUT }.sumOf { it.size * it.count })
+        assertEquals(16, fields.filter { it.reportId == HidDescriptor.CONSUMER_REPORT_ID && it.kind == INPUT }.sumOf { it.size * it.count })
         assertTrue(fields.none { it.reportId == HidDescriptor.MOUSE_REPORT_ID && it.kind == OUTPUT })
+        assertTrue(fields.none { it.reportId == HidDescriptor.CONSUMER_REPORT_ID && it.kind == OUTPUT })
     }
 
     @Test
@@ -40,6 +42,24 @@ class HidDescriptorTest {
     }
 
     @Test
+    fun `media report is one unsigned sixteen bit consumer usage with zero as release`() {
+        val field = parseFields(HidDescriptor.bytes).single {
+            it.reportId == HidDescriptor.CONSUMER_REPORT_ID && it.kind == INPUT
+        }
+        assertEquals(0x0C, field.usagePage)
+        assertEquals(0, field.minimum)
+        assertEquals(0x03FF, field.maximum)
+        assertEquals(0, field.usageMinimum)
+        assertEquals(0x03FF, field.usageMaximum)
+        assertEquals(16, field.size)
+        assertEquals(1, field.count)
+        assertEquals("Data, Array, Absolute", 0, field.flags)
+        val usages = listOf(MediaKeys.MUTE, MediaKeys.VOLUME_DOWN, MediaKeys.VOLUME_UP,
+            MediaKeys.PREVIOUS, MediaKeys.PLAY_PAUSE, MediaKeys.NEXT, MediaKeys.STOP)
+        assertTrue(usages.all { it in field.minimum..field.maximum })
+    }
+
+    @Test
     fun `descriptor reads return independent byte arrays`() {
         HidDescriptor.bytes.fill(0)
         assertEquals(0x05, HidDescriptor.bytes.first().toInt())
@@ -49,6 +69,7 @@ class HidDescriptorTest {
         val reportId: Int, val kind: Int, val size: Int, val count: Int,
         val minimum: Int, val maximum: Int, val flags: Int, val usagePage: Int,
         val usages: List<Int>,
+        val usageMinimum: Int?, val usageMaximum: Int?,
     )
 
     /** Decode HID short items rather than asserting one fixed descriptor byte sequence. */
@@ -62,6 +83,9 @@ class HidDescriptorTest {
         var maximum = 0
         var usagePage = 0
         var collections = 0
+        var applicationCollections = 0
+        var usageMinimum: Int? = null
+        var usageMaximum: Int? = null
         val usages = mutableListOf<Int>()
         while (cursor < bytes.size) {
             val prefix = bytes[cursor++].toInt() and 0xFF
@@ -83,18 +107,31 @@ class HidDescriptorTest {
                     8 -> reportId = value
                     9 -> count = value
                 }
-                2 -> if (tag == 0) usages.add(value)
+                2 -> when (tag) {
+                    0 -> usages.add(value)
+                    1 -> usageMinimum = value
+                    2 -> usageMaximum = value
+                }
                 0 -> {
                     when (tag) {
-                        INPUT, OUTPUT -> fields.add(Field(reportId, tag, size, count, minimum, maximum, value, usagePage, usages.toList()))
-                        0xA -> collections++
+                        INPUT, OUTPUT -> fields.add(Field(reportId, tag, size, count, minimum, maximum, value, usagePage, usages.toList(), usageMinimum, usageMaximum))
+                        0xA -> {
+                            if (value == 1) {
+                                assertEquals("Application collection must be top-level", 0, collections)
+                                applicationCollections++
+                            }
+                            collections++
+                        }
                         0xC -> { collections--; require(collections >= 0) }
                     }
                     usages.clear()
+                    usageMinimum = null
+                    usageMaximum = null
                 }
             }
         }
         assertEquals("Unclosed HID collections", 0, collections)
+        assertEquals("Keyboard, mouse, and consumer application collections", 3, applicationCollections)
         return fields
     }
 

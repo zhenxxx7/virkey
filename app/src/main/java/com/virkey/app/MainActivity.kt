@@ -38,6 +38,7 @@ class MainActivity : ComponentActivity() {
     private var bound = false
     private var pendingAction: RemoteAction? = null
     private var pairingJob: Job? = null
+    private var acceptsInput = false
 
     private val permissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         inputService?.controller?.refreshEnvironment()
@@ -82,10 +83,12 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        acceptsInput = true
         inputService?.controller?.refreshEnvironment()
     }
 
     override fun onPause() {
+        acceptsInput = false
         pairingJob?.cancel()
         inputService?.controller?.releaseAll()
         super.onPause()
@@ -100,9 +103,20 @@ class MainActivity : ComponentActivity() {
 
     @SuppressLint("MissingPermission")
     private fun handleAction(action: RemoteAction) {
+        // A delayed gesture callback must not re-press input after onPause's release.
+        if (!acceptsInput && when (action) {
+                is RemoteAction.KeyDown, is RemoteAction.MediaDown, is RemoteAction.MouseDown,
+                is RemoteAction.MovePointer, is RemoteAction.Scroll -> true
+                else -> false
+            }) return
         val service = inputService
         if (service == null) {
-            pendingAction = action
+            // Only setup actions may wait for service binding. Never replay stale input.
+            pendingAction = when (action) {
+                RemoteAction.RequestPermissions, RemoteAction.EnableBluetooth,
+                RemoteAction.RefreshDevices, RemoteAction.PairNewDevice, is RemoteAction.Connect -> action
+                else -> null
+            }
             return
         }
         val controller = service.controller
@@ -137,6 +151,8 @@ class MainActivity : ComponentActivity() {
             RemoteAction.ReleaseAll -> controller.releaseAll()
             is RemoteAction.KeyDown -> controller.keyDown(action.usage)
             is RemoteAction.KeyUp -> controller.keyUp(action.usage)
+            is RemoteAction.MediaDown -> controller.mediaDown(action.usage)
+            is RemoteAction.MediaUp -> controller.mediaUp(action.usage)
             is RemoteAction.MovePointer -> controller.movePointer(action.dx, action.dy)
             is RemoteAction.Scroll -> controller.scroll(action.amount)
             is RemoteAction.MouseDown -> controller.mouseDown(action.button)

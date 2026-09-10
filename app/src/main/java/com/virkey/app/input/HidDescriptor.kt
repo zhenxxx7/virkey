@@ -1,17 +1,19 @@
 package com.virkey.app.input
 
 /**
- * A keyboard and relative mouse in separate HID application collections.
+ * A keyboard, relative mouse, and media remote in separate HID application collections.
  *
  * Report IDs belong in the descriptor and Bluetooth API argument, not in the payload.
  * Keyboard input: modifiers, reserved, six usage codes. Keyboard output: LED bitmap.
  * Mouse input: three button bits, signed X, signed Y, signed vertical wheel.
+ * Consumer input: one unsigned, little-endian 16-bit usage (zero releases it).
  *
  * Usage definitions: https://www.usb.org/hid
  */
 object HidDescriptor {
     const val KEYBOARD_REPORT_ID = 1
     const val MOUSE_REPORT_ID = 2
+    const val CONSUMER_REPORT_ID = 3
 
     val bytes: ByteArray
         get() = intArrayOf(
@@ -75,6 +77,18 @@ object HidDescriptor {
             0x95, 0x03,
             0x81, 0x06,       // Input (Data, Variable, Relative)
             0xC0,
+            0xC0,
+            0x05, 0x0C,       // Usage Page (Consumer)
+            0x09, 0x01,       // Usage (Consumer Control)
+            0xA1, 0x01,       // Collection (Application)
+            0x85, CONSUMER_REPORT_ID,
+            0x15, 0x00,       // Logical Minimum (0, no event)
+            0x26, 0xFF, 0x03, // Logical Maximum (1023)
+            0x19, 0x00,       // Usage Minimum (Unassigned)
+            0x2A, 0xFF, 0x03, // Usage Maximum (1023)
+            0x75, 0x10,       // Report Size (16 bits)
+            0x95, 0x01,       // Report Count (one consumer usage)
+            0x81, 0x00,       // Input (Data, Array, Absolute)
             0xC0,
         ).map(Int::toByte).toByteArray()
 }

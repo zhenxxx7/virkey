@@ -2,7 +2,7 @@
 
 An Android tablet keyboard and trackpad for a Windows PC. Virkey presents itself as a standard Bluetooth HID keyboard and mouse; Windows does not need a receiver app.
 
-This first build targets landscape Android tablets and Windows 11. Compiling and automated tests do not establish compatibility with a particular tablet's Bluetooth firmware: the real tablet-to-PC checks below are required.
+This test build targets landscape Android tablets and Windows 11. Compiling and automated tests do not establish compatibility with a particular tablet's Bluetooth firmware: the real tablet-to-PC checks below are required.
 
 ## Preview
 
@@ -21,6 +21,8 @@ Use **English (United States) / US** as the Windows keyboard layout for matching
 
 If the PC was paired with the tablet before Virkey was installed and only sees phone/file-transfer services, remove the tablet in Windows Bluetooth settings and pair again while Virkey's keyboard session is running. Virkey does not silently remove existing pairings.
 
+**Upgrading from 0.1.0:** version 0.2.0 adds a Bluetooth media-control report. If media buttons do nothing, remove the tablet from Windows Bluetooth settings and pair again with Virkey open so Windows can refresh the device capabilities.
+
 ## Controls
 
 | Control | Behavior |
@@ -28,16 +30,22 @@ If the PC was paired with the tablet before Virkey was installed and only sees p
 | Keyboard key | Press while touching; release when lifted or cancelled |
 | Shift, Ctrl, Alt, Win | Hold with another finger while pressing another key |
 | Caps | Toggle Windows Caps Lock; indicator follows Windows LED feedback |
+| Numpad & media / Keyboard | Switch the upper deck; the trackpad stays available below |
+| Number pad | Physical keypad keys; Num Lock indicator follows Windows feedback |
+| Media controls | Mute, volume down/up, previous, play/pause, next, and stop |
 | One finger on trackpad | Move the mouse pointer |
 | One-finger tap | Left-click |
 | Two-finger tap | Right-click |
 | Two-finger vertical movement | Scroll |
+| Hold one finger still, then move | Select text or drag without pressing LEFT; lift to release |
 | LEFT button held + another finger on trackpad | Drag |
 | RIGHT button | Right mouse button, including press-and-hold |
-| Release keys | Release every key and mouse button |
+| Release keys / switching decks | Release every keyboard, media, and mouse input |
 | Connection dialog / notification → Disconnect | End the Bluetooth keyboard session |
 
 The keyboard includes Esc, F1–F12, Delete, a US QWERTY section, modifiers, and an inverted-T arrow cluster. It deliberately has no fake hardware Fn key. Mouse gestures are relative mouse input, not Windows Precision Touchpad gestures; three/four-finger Windows gestures are not implemented.
+
+To select text, first position the PC pointer at the selection start. Hold one finger still on the trackpad until its border turns green (about half a second, following Android's long-press setting), then move that same finger. Lift to release the selection. Adding a second finger ends the held drag and allows scrolling. The separate LEFT button remains available for manual dragging. Media actions depend on the PC's active media player and are unavailable in Bluetooth boot protocol mode.
 
 ## Session behavior
 
@@ -47,7 +55,7 @@ The keyboard includes Esc, F1–F12, Delete, a US QWERTY section, modifiers, and
 - Only one PC is active at a time. Reconnecting is explicit; Virkey remembers the last selected PC but does not connect or type automatically after launch.
 - No Internet permission, cloud service, accounts, analytics, or keystroke logging are included. Only the last PC address is saved locally.
 
-Android 9 / API 28 is the minimum. The tablet's OS must expose the Bluetooth HID Device profile. Other desktop operating systems, pre-login screens, BIOS, and behavior under device battery management have not been certified. Wi-Fi transport, remote screen viewing, clipboard sync, media-key layers, and macros are outside this first build.
+Android 9 / API 28 is the minimum. The tablet's OS must expose the Bluetooth HID Device profile. Other desktop operating systems, pre-login screens, BIOS, and behavior under device battery management have not been certified. Wi-Fi transport, remote screen viewing, clipboard sync, and macros are not implemented.
 
 ## Build
 
@@ -72,10 +80,11 @@ Run these on your Android tablet and Windows 11 before treating the build as rel
 1. Pair from a clean pairing and from an existing tablet pairing; verify keyboard and mouse both appear and work.
 2. Type letters, numbers, punctuation, Enter, Tab, Backspace, and arrows in Notepad. Hold a key to test Windows key repeat.
 3. Hold Shift while typing; test Ctrl+A, Ctrl+C, Ctrl+V, Alt+Tab, and Win. Check that releasing either finger releases that key and no modifier stays held.
-4. Test pointer motion, one-finger tap, double-click, two-finger right-click, scrolling, and LEFT-button dragging. Lifting one finger after a scroll must not cause a click or cursor jump.
+4. Test pointer motion, one-finger tap, double-click, two-finger right-click, scrolling, hold-to-select, and LEFT-button dragging. Lifting one finger after a scroll must not cause a click or cursor jump. A stationary long press should turn the trackpad border green; moving selects text and lifting ends the drag.
 5. While holding a key or dragging, switch apps, lock the tablet, turn Bluetooth off, and disconnect. Confirm no stuck input remains; reconnect and repeat.
 6. Sleep and wake Windows, reconnect manually, and verify Caps Lock feedback and input. Record any repair/re-pair requirement.
 7. Try tablet multi-window and both landscape directions. Android 16 may ignore orientation requests on large displays; use landscape full-screen for the laptop arrangement.
+8. Open **Numpad & media**, turn Num Lock on, and test every keypad key in Notepad. Verify the Num Lock indicator, volume/mute, and media transport in a compatible player. Switch decks while holding a key and verify it releases.
 
 ## Code map
 

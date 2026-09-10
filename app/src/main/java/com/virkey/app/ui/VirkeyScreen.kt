@@ -40,8 +40,11 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -65,11 +68,15 @@ import androidx.compose.ui.semantics.disabled
 import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.virkey.app.input.KeySpec
 import com.virkey.app.input.LaptopLayout
 
@@ -84,6 +91,39 @@ private val Outline = Color(0xFF3B4447)
 @Composable
 fun VirkeyScreen(state: RemoteUiState, onAction: (RemoteAction) -> Unit) {
     var showConnections by rememberSaveable { mutableStateOf(false) }
+    var showExtras by rememberSaveable { mutableStateOf(false) }
+    var inputEpoch by remember { mutableIntStateOf(0) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var resumed by remember(lifecycleOwner) {
+        mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
+    }
+    val latestAction by rememberUpdatedState(onAction)
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> resumed = true
+                Lifecycle.Event.ON_PAUSE -> {
+                    resumed = false
+                    inputEpoch++
+                    latestAction(RemoteAction.ReleaseAll)
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    val inputEnabled = state.isConnected && resumed && !showConnections
+    val dispatch: (RemoteAction) -> Unit = { action ->
+        if (action == RemoteAction.ReleaseAll) inputEpoch++
+        val startsInput = when (action) {
+            is RemoteAction.KeyDown, is RemoteAction.MediaDown, is RemoteAction.MouseDown,
+            is RemoteAction.MovePointer, is RemoteAction.Scroll -> true
+            else -> false
+        }
+        // Lifecycle events take effect immediately, before recomposition cancels handlers.
+        if (!startsInput || (resumed && !showConnections && state.isConnected)) onAction(action)
+    }
     val colors = darkColorScheme(
         primary = Accent,
         onPrimary = Background,
@@ -106,72 +146,38 @@ fun VirkeyScreen(state: RemoteUiState, onAction: (RemoteAction) -> Unit) {
                 Modifier.fillMaxSize().padding(horizontal = outerPadding, vertical = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(if (compact) 10.dp else 16.dp),
             ) {
-                Header(state, onAction) {
-                    onAction(RemoteAction.RefreshDevices)
-                    showConnections = true
-                }
-                Surface(
-                    Modifier.fillMaxWidth().weight(1.5f).testTag("keyboard"),
-                    shape = RoundedCornerShape(20.dp),
-                    color = Deck,
-                    border = BorderStroke(1.dp, Outline.copy(alpha = 0.65f)),
-                    shadowElevation = 8.dp,
-                ) {
-                    Column(
-                        Modifier.fillMaxSize().padding(if (compact) 10.dp else 14.dp),
-                        verticalArrangement = Arrangement.spacedBy(if (compact) 5.dp else 7.dp),
-                    ) {
-                        LaptopLayout.rows.forEachIndexed { rowIndex, row ->
-                            Row(
-                                Modifier.fillMaxWidth().weight(if (rowIndex == 0) 0.68f else 1f),
-                                horizontalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 6.dp),
-                            ) {
-                                row.forEach { key ->
-                                    if (key.usage < 0) {
-                                        Spacer(Modifier.weight(key.weight).fillMaxHeight())
-                                    } else {
-                                        LaptopKey(
-                                            key = key,
-                                            enabled = state.isConnected,
-                                            capsLock = state.capsLock,
-                                            compact = compact,
-                                            functionRow = rowIndex == 0,
-                                            onAction = onAction,
-                                            modifier = Modifier.weight(key.weight).fillMaxHeight(),
-                                        )
-                                    }
-                                }
-                            }
-                        }
+                Header(
+                    state = state,
+                    onAction = dispatch,
+                    showExtras = showExtras,
+                    togglePanel = {
+                        dispatch(RemoteAction.ReleaseAll)
+                        showExtras = !showExtras
+                    },
+                    openConnections = {
+                        dispatch(RemoteAction.ReleaseAll)
+                        dispatch(RemoteAction.RefreshDevices)
+                        showConnections = true
+                    },
+                )
+                key(inputEpoch, inputEnabled) {
+                    if (showExtras) {
+                        NumpadMediaPanel(state.copy(isConnected = inputEnabled), dispatch, Modifier.fillMaxWidth().weight(1.5f))
+                    } else {
+                        KeyboardDeck(state, inputEnabled, compact, dispatch, Modifier.fillMaxWidth().weight(1.5f))
                     }
                 }
-                Row(
+                Box(
                     Modifier.fillMaxWidth().weight(1f),
-                    horizontalArrangement = Arrangement.spacedBy(20.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                    contentAlignment = Alignment.Center,
                 ) {
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text("A LITTLE SPACE.\nFULL CONTROL.", color = Muted, fontSize = if (compact) 10.sp else 12.sp, letterSpacing = 1.3.sp, lineHeight = 19.sp)
-                        Box(Modifier.width(32.dp).height(2.dp).background(Accent.copy(alpha = 0.65f)))
-                        Text(
-                            if (state.isConnected) state.connectedName ?: "Connected PC" else "Your PC, within reach.",
-                            color = Ivory.copy(alpha = 0.85f),
-                            fontSize = if (compact) 11.sp else 13.sp,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
+                    key(inputEpoch, inputEnabled) {
+                        Trackpad(
+                            enabled = inputEnabled,
+                            onAction = dispatch,
+                            compact = compact,
+                            modifier = Modifier.fillMaxWidth(0.54f).fillMaxHeight(),
                         )
-                        if (!compact) Text("Bluetooth · No PC app needed", color = Muted, fontSize = 11.sp)
-                    }
-                    Trackpad(
-                        enabled = state.isConnected,
-                        onAction = onAction,
-                        compact = compact,
-                        modifier = Modifier.weight(2.35f).fillMaxHeight(),
-                    )
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(if (compact) 8.dp else 13.dp)) {
-                        GestureHint("ONE FINGER", "Move · tap to click", compact)
-                        GestureHint("TWO FINGERS", "Scroll · tap for right-click", compact)
-                        GestureHint("DRAG", "Hold LEFT + move on pad", compact)
                     }
                 }
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -180,16 +186,67 @@ fun VirkeyScreen(state: RemoteUiState, onAction: (RemoteAction) -> Unit) {
                     Text(state.statusMessage, color = Muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                     Text("US QWERTY", color = Muted.copy(alpha = 0.75f), fontSize = 10.sp, letterSpacing = 1.sp)
                     Spacer(Modifier.width(16.dp))
-                    Text("VIRKEY / 01", color = Muted.copy(alpha = 0.5f), fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+                    Text("zhenx", modifier = Modifier.testTag("watermark"), color = Muted.copy(alpha = 0.55f), fontSize = 12.sp, letterSpacing = 1.sp, fontFamily = FontFamily.Monospace)
                 }
             }
         }
-        if (showConnections) ConnectionDialog(state, onAction) { showConnections = false }
+        if (showConnections) ConnectionDialog(state, dispatch) { showConnections = false }
     }
 }
 
 @Composable
-private fun Header(state: RemoteUiState, onAction: (RemoteAction) -> Unit, openConnections: () -> Unit) {
+private fun KeyboardDeck(
+    state: RemoteUiState,
+    enabled: Boolean,
+    compact: Boolean,
+    onAction: (RemoteAction) -> Unit,
+    modifier: Modifier,
+) {
+    Surface(
+        modifier.testTag("keyboard"),
+        shape = RoundedCornerShape(20.dp),
+        color = Deck,
+        border = BorderStroke(1.dp, Outline.copy(alpha = 0.65f)),
+        shadowElevation = 8.dp,
+    ) {
+        Column(
+            Modifier.fillMaxSize().padding(if (compact) 10.dp else 14.dp),
+            verticalArrangement = Arrangement.spacedBy(if (compact) 5.dp else 7.dp),
+        ) {
+            LaptopLayout.rows.forEachIndexed { rowIndex, row ->
+                Row(
+                    Modifier.fillMaxWidth().weight(if (rowIndex == 0) 0.68f else 1f),
+                    horizontalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 6.dp),
+                ) {
+                    row.forEach { key ->
+                        if (key.usage < 0) {
+                            Spacer(Modifier.weight(key.weight).fillMaxHeight())
+                        } else {
+                            LaptopKey(
+                                key = key,
+                                enabled = enabled,
+                                capsLock = state.capsLock,
+                                compact = compact,
+                                functionRow = rowIndex == 0,
+                                onAction = onAction,
+                                modifier = Modifier.weight(key.weight).fillMaxHeight(),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun Header(
+    state: RemoteUiState,
+    onAction: (RemoteAction) -> Unit,
+    showExtras: Boolean,
+    togglePanel: () -> Unit,
+    openConnections: () -> Unit,
+) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Canvas(Modifier.size(33.dp)) {
             val line = 2.dp.toPx()
@@ -210,6 +267,15 @@ private fun Header(state: RemoteUiState, onAction: (RemoteAction) -> Unit, openC
             Text("KEYBOARD + TRACKPAD", color = Muted, fontSize = 9.sp, letterSpacing = 1.8.sp)
         }
         Spacer(Modifier.weight(1f))
+        OutlinedButton(
+            onClick = togglePanel,
+            modifier = Modifier.testTag("panel_toggle"),
+            shape = RoundedCornerShape(12.dp),
+            border = BorderStroke(1.dp, if (showExtras) Accent.copy(alpha = 0.6f) else Outline),
+        ) {
+            Text(if (showExtras) "Keyboard" else "Numpad & media", fontSize = 12.sp)
+        }
+        Spacer(Modifier.width(12.dp))
         if (state.isConnected) {
             TextButton(onClick = { onAction(RemoteAction.ReleaseAll) }) {
                 Text("Release keys", color = Muted, fontSize = 12.sp)
@@ -315,36 +381,26 @@ private fun LaptopKey(
 }
 
 @Composable
-private fun GestureHint(title: String, description: String, compact: Boolean) {
-    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-        Text(title, color = Muted.copy(alpha = 0.8f), fontSize = if (compact) 8.sp else 9.sp, letterSpacing = 1.1.sp)
-        Text(description, color = Ivory.copy(alpha = 0.8f), fontSize = if (compact) 10.sp else 12.sp, lineHeight = 16.sp)
-    }
-}
-
-@Composable
 private fun Trackpad(enabled: Boolean, onAction: (RemoteAction) -> Unit, compact: Boolean, modifier: Modifier) {
     val latestAction by rememberUpdatedState(onAction)
     var touching by remember { mutableStateOf(false) }
-    var heldButtons by remember { mutableStateOf(0) }
+    var dragging by remember { mutableStateOf(false) }
+    val buttons = remember { TrackpadButtons() }
+    val haptic = LocalHapticFeedback.current
     val buttonAction: (RemoteAction) -> Unit = { action ->
-        when (action) {
-            is RemoteAction.MouseDown -> heldButtons = heldButtons or action.button
-            is RemoteAction.MouseUp -> heldButtons = heldButtons and action.button.inv()
-            else -> Unit
-        }
-        latestAction(action)
+        buttons.update(action, manual = true).forEach(latestAction)
     }
     val shape = RoundedCornerShape(15.dp)
     Column(
         modifier.testTag("trackpad").clip(shape)
             .background(Brush.verticalGradient(listOf(Color(0xFF222A2D), Color(0xFF1D2427))))
-            .border(1.dp, if (touching) Accent.copy(alpha = 0.55f) else Outline, shape),
+            .border(if (dragging) 2.dp else 1.dp, if (dragging) Accent else if (touching) Accent.copy(alpha = 0.55f) else Outline, shape),
     ) {
         Box(
-            Modifier.fillMaxWidth().weight(1f)
+            Modifier.fillMaxWidth().weight(1f).testTag("trackpad_surface")
                 .semantics {
-                    contentDescription = "Trackpad. One finger moves the pointer. Tap to click. Two fingers scroll or tap for right-click. Hold the left mouse button while moving to drag."
+                    contentDescription = "Trackpad. One finger moves the pointer. Tap to click. Hold one finger still, then move to select or drag. Lift to release. Two fingers scroll or tap for right-click."
+                    stateDescription = if (dragging) "Dragging" else "Ready"
                     if (!enabled) disabled()
                 }
                 .pointerInput(enabled) {
@@ -354,17 +410,37 @@ private fun Trackpad(enabled: Boolean, onAction: (RemoteAction) -> Unit, compact
                         val down = awaitFirstDown(requireUnconsumed = false)
                         down.consume()
                         touching = true
+                        val manualPressesAtStart = buttons.manualPressCount
                         val gesture = TrackpadGesture(
                             startedAt = down.uptimeMillis,
                             scrollDistance = scrollUnit,
                             tapSlop = viewConfiguration.touchSlop,
+                            holdDelayMillis = viewConfiguration.longPressTimeoutMillis,
                         )
+                        var eventTime = down.uptimeMillis
                         try {
                             while (true) {
-                                val event = awaitPointerEvent(PointerEventPass.Main)
+                                val delay = gesture.millisUntilHold(eventTime,
+                                    buttons.manualButtons != 0 || buttons.manualPressCount != manualPressesAtStart)
+                                val event = if (delay != null) {
+                                    withTimeoutOrNull(delay.coerceAtLeast(1L)) { awaitPointerEvent(PointerEventPass.Main) }
+                                } else {
+                                    awaitPointerEvent(PointerEventPass.Main)
+                                }
+                                if (event == null) {
+                                    eventTime += requireNotNull(delay)
+                                    gesture.hold(eventTime,
+                                        buttons.manualButtons != 0 || buttons.manualPressCount != manualPressesAtStart).forEach { action ->
+                                        buttons.update(action, manual = false).forEach(latestAction)
+                                    }
+                                    if (!dragging && gesture.isDragging) haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    dragging = gesture.isDragging
+                                    continue
+                                }
+                                eventTime = event.changes.maxOfOrNull { it.uptimeMillis } ?: eventTime
                                 gesture.update(
-                                    time = event.changes.maxOfOrNull { it.uptimeMillis } ?: down.uptimeMillis,
-                                    buttonsHeld = heldButtons != 0,
+                                    time = eventTime,
+                                    buttonsHeld = buttons.manualButtons != 0 || buttons.manualPressCount != manualPressesAtStart,
                                     points = event.changes.map {
                                         TouchDelta(
                                             dx = it.position.x - it.previousPosition.x,
@@ -373,12 +449,16 @@ private fun Trackpad(enabled: Boolean, onAction: (RemoteAction) -> Unit, compact
                                             previouslyPressed = it.previousPressed,
                                         )
                                     },
-                                ).forEach(latestAction)
+                                ).forEach { action -> buttons.update(action, manual = false).forEach(latestAction) }
+                                if (!dragging && gesture.isDragging) haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                dragging = gesture.isDragging
                                 event.changes.forEach { it.consume() }
                                 if (event.changes.none { it.pressed }) break
                             }
                         } finally {
+                            gesture.cancel().forEach { action -> buttons.update(action, manual = false).forEach(latestAction) }
                             touching = false
+                            dragging = false
                         }
                     }
                 },
@@ -392,8 +472,9 @@ private fun Trackpad(enabled: Boolean, onAction: (RemoteAction) -> Unit, compact
             } else {
                 Canvas(Modifier.size(18.dp)) {
                     val stroke = 1.dp.toPx()
-                    drawLine(Outline, Offset(size.width / 2, 0f), Offset(size.width / 2, size.height), stroke)
-                    drawLine(Outline, Offset(0f, size.height / 2), Offset(size.width, size.height / 2), stroke)
+                    val ink = if (dragging) Accent else Outline
+                    drawLine(ink, Offset(size.width / 2, 0f), Offset(size.width / 2, size.height), stroke)
+                    drawLine(ink, Offset(0f, size.height / 2), Offset(size.width, size.height / 2), stroke)
                 }
             }
             Box(Modifier.align(Alignment.TopCenter).padding(top = 9.dp).width(27.dp).height(2.dp).background(Outline.copy(alpha = 0.8f), CircleShape))

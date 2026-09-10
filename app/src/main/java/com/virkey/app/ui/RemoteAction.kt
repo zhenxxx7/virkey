@@ -9,6 +9,8 @@ sealed interface RemoteAction {
     data object Disconnect : RemoteAction
     data class KeyDown(val usage: Int) : RemoteAction
     data class KeyUp(val usage: Int) : RemoteAction
+    data class MediaDown(val usage: Int) : RemoteAction
+    data class MediaUp(val usage: Int) : RemoteAction
     data object ReleaseAll : RemoteAction
     data class MovePointer(val dx: Int, val dy: Int) : RemoteAction
     data class Scroll(val amount: Int) : RemoteAction
