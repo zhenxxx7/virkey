@@ -6,7 +6,7 @@ This test build targets landscape Android tablets and Windows 11. Compiling and 
 
 ## Preview
 
-![Virkey laptop keyboard and trackpad interface](https://github.com/zhenxxx7/virkey/releases/download/v0.1.0/virkey-tablet-preview.png)
+![Virkey laptop keyboard and trackpad interface](https://github.com/zhenxxx7/virkey/releases/download/v0.2.0/virkey-tablet.png)
 
 ## First connection
 
