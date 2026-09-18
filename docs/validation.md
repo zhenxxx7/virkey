@@ -1,5 +1,8 @@
 # Virkey 0.3.0 local test-build validation
 
+Historical report. See [0.6.0 validation](validation-0.6.0.md) for the current
+release's checks and artifacts.
+
 Built on Windows on 2026-09-18. Bluetooth remains the default; optional Wi-Fi
 input and Windows media preview require the portable Windows host. USB is not
 included. Source and release assets are published as v0.3.0.

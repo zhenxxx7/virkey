@@ -1,9 +1,11 @@
 # Virkey local Wi-Fi protocol 1
 
-Bluetooth remains the default. Wi-Fi input requires the portable Windows host.
+Bluetooth remains the first-run default; the selected transport is remembered. Wi-Fi input requires the portable Windows host.
 All traffic uses a persistent TLS socket (port 49372 by default), with UTF-8
 newline-delimited JSON. Maximum incoming line: 524288 characters. Protocol v1
-supports one authenticated tablet per host. No Internet service is involved.
+supports one authenticated tablet per host. No Internet service is involved in
+this local protocol. Android's optional lyric lookup uses a separate, opt-in
+HTTPS request to LRCLIB; lyrics never travel through the host or pairing socket.
 
 ## Pairing
 
@@ -25,6 +27,36 @@ No credentials or private keys are committed. No automatic firewall changes.
 Client authentication: `{"type":"auth","protocol":1,"pin":"123456","name":"Virkey tablet"}`.
 Server success: `{"type":"ready","name":"PC name","ledsKnown":false,"capsLock":false,"numLock":true}`.
 Server failure: `{"type":"error","message":"Reason"}` followed by close.
+
+### Remembered pairing extension (app and host 0.6.0)
+
+- First-pair `auth` adds `remember:true`. Only after PIN validation and acquiring
+  the single input session does the host issue a random 256-bit reconnect token.
+- `ready` adds `rememberSupported:true`, `deviceId` (32 hexadecimal characters)
+  and `token` (64 hexadecimal characters). These credentials are sent only over
+  the fingerprint-confirmed TLS connection. Legacy PIN-only clients still work.
+- Subsequent `auth` sends `deviceId` and `token` instead of `pin`. Sending both
+  authentication methods is rejected. Tokens are checked in constant time by
+  comparing SHA-256 hashes. PIN/token failures share the pairing rate limit.
+- Reconnect `ready` does not reissue or rotate the token. A dropped response
+  cannot invalidate the client's last working credential. Authentication still
+  checks the complete saved certificate before sending any token.
+- Host certificate/private key and token hashes persist in Windows CurrentUser
+  DPAPI-protected `%LOCALAPPDATA%\Virkey\pairing.dat`. A lifetime file lease
+  prevents concurrent hosts overwriting revocations. At most 16 recent pairings
+  are retained. No plaintext tokens or PINs are stored by the host.
+- Android stores one last-PC record in backup-excluded app storage using AES-GCM
+  with an Android Keystore key. Name, address, certificate pin and token are all
+  authenticated by encryption. UI state includes public display metadata only.
+- Discovery replies may add `fingerprint`. A failed remembered connection may
+  use that hint to retry once at a new address; TLS must still match the original
+  saved fingerprint. Authentication rejection never triggers a PIN fallback.
+- A revoked/unknown token returns `error` with `code:"pairingRequired"`. A second
+  valid client gets `code:"busy"`; it cannot evict the active tablet.
+- Host **Reset pairing** revokes tokens, disconnects input and rotates the PIN,
+  without changing the PC certificate. Tablet **Forget PC** disconnects and
+  deletes only its local credential. New PIN pairing can replace a forgotten or
+  revoked credential. Neither operation disables certificate checking.
 
 ## Input
 
@@ -72,15 +104,37 @@ Network media commands and HID media usages must not both fire for a single tap.
 
 ## Android shared API
 
+### Optional app dock extension (host 0.4.0)
+
+`ready` adds `dock:true` and a stable `pcId`. Older hosts omit these fields; the
+tablet leaves app launch disabled. Only authenticated connections use the dock.
+
+- Client `{"type":"apps"}` requests the bounded local app catalog.
+- Host sends `appsBegin` with `pcId`, then up to 256 `app` frames containing
+  `pcId`, `id`, `name`, and optional `icon` (base64 PNG, at most 32768 decoded
+  bytes), followed by `appsEnd` with `pcId`.
+- Client `{"type":"launchApp","pcId":"...","id":"..."}` requests a known app.
+  The host resolves the ID against discovered/locally added paths. Paths and
+  arbitrary command strings are never accepted from the tablet.
+- Host acknowledges with `appLaunched`, or `appError` with a bounded message.
+- App discovery/launch runs separately from input and heartbeat processing.
+- Soundboard buttons emit ordinary ordered `key` down/up events. They introduce
+  no new remote command protocol and also work over Bluetooth HID.
+
+### Common state
+
 Package `com.virkey.app.network`:
 
 - `WifiState(isConnected:Boolean=false, isConnecting:Boolean=false,
   hostName:String="", status:String="Connect to Virkey Host on your PC",
   pendingFingerprint:String?=null, capsLock:Boolean=false, numLock:Boolean=false, ledsKnown:Boolean=false,
   nowPlaying:NowPlayingState=NowPlayingState())`.
-- `WifiHost(address:String,name:String)` and `WifiState.hosts:List<WifiHost>`
+- `WifiHost(address:String,name:String,fingerprint:String?=null)` and `WifiState.hosts:List<WifiHost>`
   (default empty), `WifiState.isDiscovering:Boolean=false`,
   `WifiController.discover()` support bounded two-second LAN discovery.
+- `WifiState.savedPc:SavedWifiPc?`, `loadingSavedPc`, `pairingRequired`, and
+  `rememberedConnection` expose pairing UI state without exposing the token.
+  `SavedWifiPc` contains the last address, display name and certificate fingerprint.
 - `NowPlayingState(available:Boolean=false, sessionId:String="", trackId:String="",
   title:String="", artist:String="", album:String="", player:String="",
   playing:Boolean=false, positionMs:Long=0, durationMs:Long=0,
@@ -90,9 +144,12 @@ Package `com.virkey.app.network`:
   repeat:String="off", artwork:android.graphics.Bitmap?=null)`.
 - `WifiController`: constructor no Activity required, `val state:StateFlow<WifiState>`,
   `connect(address:String,pin:String,confirmedFingerprint:String?=null)`,
+  `reconnectSaved(address:String="")`, `forgetPc()`,
   `send(action:RemoteAction)`, `media(command:String,sessionId:String,trackId:String,
   positionMs:Long=0,enabled:Boolean=false,mode:String="off")`,
   `disconnect()`, `close()`.
+- The production activity supplies `EncryptedWifiPairingStore` using the app's
+  backup-excluded storage; the no-argument controller uses an in-memory test store.
 - Controller owns coroutine scope and IO; public methods are nonblocking.
   UI updates are StateFlow; artwork decode off main thread with bounded dimensions.
   Parse address as IPv4/hostname optionally followed by :port; no arbitrary URLs.

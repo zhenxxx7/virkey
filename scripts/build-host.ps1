@@ -24,8 +24,8 @@ try {
     }
     $artifacts = Join-Path $projectRoot '.tools\release-artifacts'
     New-Item -ItemType Directory -Path $artifacts -Force | Out-Null
-    Copy-Item -LiteralPath $published -Destination (Join-Path $artifacts 'virkey-host-0.3.0.exe') -Force
-    Write-Host "Host ready: $artifacts\virkey-host-0.3.0.exe"
+    Copy-Item -LiteralPath $published -Destination (Join-Path $artifacts 'virkey-host-0.6.0.exe') -Force
+    Write-Host "Host ready: $artifacts\virkey-host-0.6.0.exe"
 } finally {
     $env:DOTNET_ROOT = $oldRoot
     $env:DOTNET_CLI_TELEMETRY_OPTOUT = $oldTelemetry

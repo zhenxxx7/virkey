@@ -80,6 +80,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.virkey.app.input.KeySpec
 import com.virkey.app.input.LaptopLayout
 import com.virkey.app.network.WifiState
+import com.virkey.app.dock.DockItem
 
 private val Background = Color(0xFF101315)
 private val Deck = Color(0xFF1B2023)
@@ -104,11 +105,21 @@ fun VirkeyScreen(
     onWifiTrust: () -> Unit = {},
     onWifiDisconnect: () -> Unit = {},
     onWifiDiscover: () -> Unit = {},
+    onWifiReconnect: (String) -> Unit = {},
+    onWifiForget: () -> Unit = {},
     onMedia: (String, Long, Boolean, String) -> Unit = { _, _, _, _ -> },
+    dockItems: List<DockItem> = emptyList(),
+    shortcutBusy: Boolean = false,
+    onDockRun: (DockItem) -> Unit = {},
+    onDockSave: (DockItem) -> Unit = {},
+    onDockRemove: (String) -> Unit = {},
+    onDockMove: (String, Int) -> Unit = { _, _ -> },
+    onAppsRefresh: () -> Unit = {},
     onAction: (RemoteAction) -> Unit,
 ) {
     var showConnections by rememberSaveable { mutableStateOf(false) }
     var showExtras by rememberSaveable { mutableStateOf(false) }
+    var showDockEditor by rememberSaveable { mutableStateOf(false) }
     var inputEpoch by remember { mutableIntStateOf(0) }
     val lifecycleOwner = LocalLifecycleOwner.current
     var resumed by remember(lifecycleOwner) {
@@ -130,7 +141,7 @@ fun VirkeyScreen(
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
-    val inputEnabled = state.isConnected && resumed && !showConnections
+    val inputEnabled = state.isConnected && resumed && !showConnections && !showDockEditor && !shortcutBusy
     val dispatch: (RemoteAction) -> Unit = { action ->
         if (action == RemoteAction.ReleaseAll) inputEpoch++
         val startsInput = when (action) {
@@ -139,7 +150,7 @@ fun VirkeyScreen(
             else -> false
         }
         // Lifecycle events take effect immediately, before recomposition cancels handlers.
-        if (!startsInput || (resumed && !showConnections && state.isConnected)) onAction(action)
+        if (!startsInput || (resumed && !showConnections && !showDockEditor && !shortcutBusy && state.isConnected)) onAction(action)
     }
     val colors = darkColorScheme(
         primary = Accent,
@@ -197,6 +208,9 @@ fun VirkeyScreen(
                         KeyboardDeck(state, inputEnabled, compact, dispatch, Modifier.fillMaxWidth().weight(1.5f))
                     }
                 }
+                AppDock(dockItems, inputEnabled, connectionMode, wifiState,
+                    onRun = { item -> if (inputEnabled) { dispatch(RemoteAction.ReleaseAll); onDockRun(item) } },
+                    onCustomize = { dispatch(RemoteAction.ReleaseAll); showDockEditor = true })
                 Box(
                     Modifier.fillMaxWidth().weight(1f),
                     contentAlignment = Alignment.Center,
@@ -204,6 +218,7 @@ fun VirkeyScreen(
                     key(inputEpoch, inputEnabled, connectionMode) {
                         Trackpad(
                             enabled = inputEnabled,
+                            showConnectionHint = !state.isConnected,
                             onAction = dispatch,
                             compact = compact,
                             modifier = Modifier.fillMaxWidth(0.54f).fillMaxHeight(),
@@ -220,6 +235,9 @@ fun VirkeyScreen(
                 }
             }
         }
+        if (showDockEditor) {
+            DockEditor(dockItems, wifiState, onDockSave, onDockRemove, onDockMove, onAppsRefresh) { showDockEditor = false }
+        }
         if (showConnections) {
             if (connectionMode == ConnectionMode.WIFI) {
                 WifiConnectionDialog(
@@ -229,6 +247,8 @@ fun VirkeyScreen(
                     onDisconnect = onWifiDisconnect,
                     onDismiss = { showConnections = false },
                     onDiscover = onWifiDiscover,
+                    onReconnect = onWifiReconnect,
+                    onForget = onWifiForget,
                 )
             } else {
                 ConnectionDialog(state, dispatch) { showConnections = false }
@@ -430,7 +450,7 @@ private fun LaptopKey(
 }
 
 @Composable
-private fun Trackpad(enabled: Boolean, onAction: (RemoteAction) -> Unit, compact: Boolean, modifier: Modifier) {
+private fun Trackpad(enabled: Boolean, onAction: (RemoteAction) -> Unit, compact: Boolean, modifier: Modifier, showConnectionHint: Boolean = !enabled) {
     val latestAction by rememberUpdatedState(onAction)
     var touching by remember { mutableStateOf(false) }
     var dragging by remember { mutableStateOf(false) }
@@ -513,7 +533,7 @@ private fun Trackpad(enabled: Boolean, onAction: (RemoteAction) -> Unit, compact
                 },
             contentAlignment = Alignment.Center,
         ) {
-            if (!enabled) {
+            if (showConnectionHint) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text("READY WHEN YOU ARE", color = Muted, fontSize = if (compact) 9.sp else 11.sp, letterSpacing = 2.sp)
                     Text("Connect your PC to start", color = Muted.copy(alpha = 0.6f), fontSize = if (compact) 10.sp else 12.sp)

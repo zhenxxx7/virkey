@@ -29,6 +29,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -54,6 +55,8 @@ import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.virkey.app.input.MediaKeys
+import com.virkey.app.media.LyricsRepository
+import com.virkey.app.media.LyricsSource
 import com.virkey.app.network.NowPlayingState
 import kotlin.math.roundToInt
 
@@ -73,7 +76,12 @@ fun NumpadMediaPanel(
     nowPlaying: NowPlayingState = NowPlayingState(),
     onMedia: (String, Long, Boolean, String) -> Unit = { _, _, _, _ -> },
     isWifi: Boolean = false,
+    lyricsSource: LyricsSource? = null,
 ) {
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    var showLyrics by rememberSaveable { mutableStateOf(false) }
+    var lyricsAllowed by rememberSaveable { mutableStateOf(false) }
+    val defaultLyricsSource = remember { LyricsRepository() }
     Surface(
         modifier.testTag("numpad_media_panel"),
         shape = RoundedCornerShape(20.dp),
@@ -90,6 +98,7 @@ fun NumpadMediaPanel(
                 Modifier.fillMaxSize().padding(padding),
                 horizontalArrangement = Arrangement.spacedBy(if (compact) 18.dp else 28.dp),
             ) {
+                if (!isWifi || !expanded) {
                 Column(
                     Modifier.weight(1f).fillMaxHeight().testTag("numpad"),
                     verticalArrangement = Arrangement.spacedBy(if (compact) 7.dp else 10.dp),
@@ -158,19 +167,22 @@ fun NumpadMediaPanel(
                     }
                 }
                 Box(Modifier.width(1.dp).fillMaxHeight().background(PanelOutline.copy(alpha = 0.6f)))
+                }
                 Column(
-                    Modifier.weight(1.2f).fillMaxHeight().testTag("media_controls"),
+                    Modifier.weight(if (isWifi) 1.65f else 1.2f).fillMaxHeight().testTag("media_controls"),
                     verticalArrangement = Arrangement.spacedBy(if (compact) 5.dp else 10.dp),
                 ) {
                     if (isWifi) {
                         NowPlayingCard(nowPlaying, state.isConnected, compact,
                             onSeek = { onMedia("seek", it, false, "off") },
-                            modifier = Modifier.fillMaxWidth().weight(1f))
+                            modifier = Modifier.fillMaxWidth().weight(1f),
+                            showLyrics = showLyrics, lyricsAllowed = lyricsAllowed,
+                            onLyricsAllowed = { lyricsAllowed = it }, lyricsSource = lyricsSource ?: defaultLyricsSource)
                     } else {
                         PanelHeading("SOUND & PLAYBACK", compact)
                     }
-                    Row(
-                        Modifier.fillMaxWidth().then(if (isWifi) Modifier.height(if (compact) 32.dp else 42.dp) else Modifier.weight(1f)),
+                    if (!isWifi) Row(
+                        Modifier.fillMaxWidth().weight(1f),
                         horizontalArrangement = Arrangement.spacedBy(gap),
                     ) {
                         MediaPanelKey("MUTE", "Mute", null, MediaKeys.MUTE, state, compact || isWifi, onAction, Modifier.weight(1f).fillMaxHeight())
@@ -178,7 +190,7 @@ fun NumpadMediaPanel(
                         MediaPanelKey("+", "Volume up", "VOLUME".takeUnless { isWifi }, MediaKeys.VOLUME_UP, state, compact || isWifi, onAction, Modifier.weight(1f).fillMaxHeight())
                     }
                     Row(
-                        Modifier.fillMaxWidth().then(if (isWifi) Modifier.height(if (compact) 40.dp else 52.dp) else Modifier.weight(1f)),
+                        Modifier.fillMaxWidth().then(if (isWifi) Modifier.height(if (compact) 38.dp else 48.dp) else Modifier.weight(1f)),
                         horizontalArrangement = Arrangement.spacedBy(gap),
                     ) {
                         if (isWifi && nowPlaying.available) {
@@ -199,20 +211,32 @@ fun NumpadMediaPanel(
                             MediaPanelKey("▶|", "Next", "NEXT", MediaKeys.NEXT, state, compact, onAction, Modifier.weight(1f).fillMaxHeight())
                             MediaPanelKey("■", "Stop", "STOP", MediaKeys.STOP, state, compact, onAction, Modifier.weight(1f).fillMaxHeight())
                         }
+                        if (isWifi) {
+                            Spacer(Modifier.width(if (compact) 2.dp else 6.dp))
+                            MediaPanelKey("MUTE", "Mute", null, MediaKeys.MUTE, state, true, onAction, Modifier.weight(0.8f).fillMaxHeight())
+                            MediaPanelKey("−", "Volume down", null, MediaKeys.VOLUME_DOWN, state, true, onAction, Modifier.weight(0.8f).fillMaxHeight())
+                            MediaPanelKey("+", "Volume up", null, MediaKeys.VOLUME_UP, state, true, onAction, Modifier.weight(0.8f).fillMaxHeight())
+                        }
                     }
-                    if (isWifi && nowPlaying.available && (nowPlaying.canShuffle || nowPlaying.canRepeat)) {
-                        Row(Modifier.fillMaxWidth().height(if (compact) 26.dp else 30.dp), horizontalArrangement = Arrangement.spacedBy(gap)) {
-                            if (nowPlaying.canShuffle) {
+                    if (isWifi) {
+                        Row(Modifier.fillMaxWidth().height(if (compact) 28.dp else 32.dp), horizontalArrangement = Arrangement.spacedBy(gap)) {
+                            if (nowPlaying.available && nowPlaying.canShuffle) {
                                 MediaCommandKey(if (nowPlaying.shuffle) "SHUFFLE ON" else "SHUFFLE", "Shuffle", null,
                                     state.isConnected, true, { onMedia("shuffle", 0L, !nowPlaying.shuffle, "off") },
                                     Modifier.weight(1f).fillMaxHeight(), accent = nowPlaying.shuffle)
                             }
-                            if (nowPlaying.canRepeat) {
+                            if (nowPlaying.available && nowPlaying.canRepeat) {
                                 val nextMode = when (nowPlaying.repeat) { "off" -> "all"; "all" -> "one"; else -> "off" }
                                 MediaCommandKey(when (nowPlaying.repeat) { "all" -> "REPEAT ALL"; "one" -> "REPEAT ONE"; else -> "REPEAT OFF" },
                                     "Repeat", null, state.isConnected, true, { onMedia("repeat", 0L, false, nextMode) },
                                     Modifier.weight(1f).fillMaxHeight(), accent = nowPlaying.repeat != "off")
                             }
+                            MediaCommandKey(if (showLyrics) "HIDE LYRICS" else "LYRICS", "Lyrics", null,
+                                state.isConnected && nowPlaying.available, true,
+                                { showLyrics = !showLyrics; if (showLyrics) expanded = true },
+                                Modifier.weight(1f).fillMaxHeight(), accent = showLyrics)
+                            MediaCommandKey(if (expanded) "NUMBER PAD" else "EXPAND", "Expand player", null, true, true,
+                                { expanded = !expanded; if (!expanded) showLyrics = false }, Modifier.weight(1f).fillMaxHeight())
                         }
                     } else if (!isWifi) {
                         Text(
@@ -240,9 +264,10 @@ private fun MediaCommandKey(
     modifier: Modifier,
     accent: Boolean = false,
 ) {
-    val shape = RoundedCornerShape(if (compact) 6.dp else 8.dp)
-    Box(modifier.clip(shape).background(if (accent) Color(0xFF2C443E) else PanelKeyFace)
-        .border(1.dp, PanelOutline, shape)
+    val shape = RoundedCornerShape(if (compact) 10.dp else 14.dp)
+    Box(modifier.clip(shape).background(Brush.verticalGradient(if (accent)
+        listOf(Color(0xFF466B5E), Color(0xFF2C443E)) else listOf(Color(0xFF3B4748), Color(0xFF293334))))
+        .border(1.dp, Brush.verticalGradient(listOf(Color.White.copy(alpha = 0.24f), Color.White.copy(alpha = 0.06f))), shape)
         .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
         .semantics { contentDescription = "Media $description" }
         .padding(horizontal = 4.dp, vertical = 2.dp), contentAlignment = Alignment.Center) {

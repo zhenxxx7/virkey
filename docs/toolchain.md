@@ -1,6 +1,6 @@
-# Reproducible Android build
+# Android and Windows builds
 
-Virkey uses Android Gradle Plugin **8.13.2**, Gradle **8.13**, Kotlin and the Compose compiler plugin **2.2.21**, and Java **17**. The Android SDK configuration is API **36**, build tools **35.0.0**, and minimum Android API **28**. The APK version is **0.3.0** (`versionCode=3`).
+Virkey uses Android Gradle Plugin **8.13.2**, Gradle **8.13**, Kotlin and the Compose compiler plugin **2.2.21**, and Java **17**. The Android SDK configuration is API **36**, build tools **35.0.0**, and minimum Android API **28**. The APK version is **0.6.0** (`versionCode=6`).
 
 From PowerShell in the project directory:
 
@@ -23,6 +23,30 @@ its Gradle JDK as Java 17 and SDK as `.tools/android-sdk`, or use an existing
 compatible SDK. Outside the helper script, set `ANDROID_HOME` or your untracked
 `local.properties` to the SDK directory. The release variant is deliberately
 unsigned; production signing credentials must never be committed.
+
+## Windows host and logo
+
+Run `.\scripts\build-host.ps1` to provision the project-local .NET 8 SDK,
+publish the Windows x64 self-contained EXE and run its self-tests. The result is
+`.tools/release-artifacts/virkey-host-0.6.0.exe`; no separate .NET installation
+is required on the receiving PC. The EXE is unsigned.
+
+The committed `windows/Virkey.Host/Assets/virkey.ico` contains 16, 20, 24, 32,
+40, 48, 64, 128 and 256-pixel versions of the Android vector logo. It is both the
+native EXE icon and an embedded resource used by the window and system tray.
+No adjacent icon file is needed when distributing the EXE.
+
+After editing `app/src/main/res/drawable/ic_launcher.xml`, regenerate the ICO
+and documentation logo before rebuilding the host:
+
+```powershell
+powershell.exe -NoProfile -STA -File .\scripts\render-host-icon.ps1
+.\scripts\build-host.ps1
+```
+
+The renderer uses Windows' built-in WPF geometry and PNG APIs. Normal host
+builds use the checked-in ICO and do not need to run the renderer.
+See [release packaging](publishing.md) for checksums, previews and exclusions.
 
 ## Version and download evidence
 

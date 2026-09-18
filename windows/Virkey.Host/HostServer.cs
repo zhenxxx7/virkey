@@ -15,10 +15,12 @@ internal sealed class HostServer : IDisposable
 {
     private readonly object gate=new();
     private readonly X509Certificate2 certificate;
+    private readonly PairingStore pairings;
     private readonly AuthLimiter limiter=new();
     private readonly SemaphoreSlim handshakes=new(4);
     private readonly Func<IInputSink> inputFactory;
     private readonly bool mediaEnabled;
+    public AppCatalog Apps { get; }
     private CancellationTokenSource? lifetime;
     private TcpListener? listener;
     private UdpClient? discovery;
@@ -32,19 +34,13 @@ internal sealed class HostServer : IDisposable
     public string ShortFingerprint=>string.Join(" ",Enumerable.Range(0,3).Select(i=>Fingerprint.Substring(i*4,4)));
     public int Port{get;private set;}=Protocol.Port;
 
-    public HostServer(Func<IInputSink>? factory=null,bool mediaEnabled=true)
+    public HostServer(Func<IInputSink>? factory=null,bool mediaEnabled=true,AppCatalog? apps=null,PairingStore? pairings=null)
     {
         inputFactory=factory??(()=>new WindowsInput());
         this.mediaEnabled=mediaEnabled;
-        using var key=RSA.Create(2048);
-        var request=new CertificateRequest("CN=Virkey Host",key,HashAlgorithmName.SHA256,RSASignaturePadding.Pkcs1);
-        request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false,false,0,true));
-        request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature,true));
-        request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection{new("1.3.6.1.5.5.7.3.1")},false));
-        using var created=request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1),DateTimeOffset.UtcNow.AddYears(1));
-        // Windows Schannel requires an OS-backed temporary key container. Omitting
-        // PersistKeySet removes it when this certificate is disposed.
-        certificate=new X509Certificate2(created.Export(X509ContentType.Pfx),(string?)null,X509KeyStorageFlags.UserKeySet);
+        Apps=apps??(factory is null?AppCatalog.Default():new AppCatalog([]));
+        this.pairings=pairings??(factory is null?PairingStore.Default():new PairingStore());
+        try{certificate=this.pairings.OpenCertificate();}catch{this.pairings.Dispose();throw;}
         Fingerprint=Convert.ToHexString(SHA256.HashData(certificate.RawData));
     }
     private static string NewPin()=>RandomNumberGenerator.GetInt32(0,1000000).ToString("D6");
@@ -75,7 +71,7 @@ internal sealed class HostServer : IDisposable
 
     private async Task Discover(UdpClient udp,CancellationToken token)
     {
-        var response=JsonSerializer.SerializeToUtf8Bytes(new{protocol=1,name=Environment.MachineName,port=Port},Protocol.Json);
+        var response=JsonSerializer.SerializeToUtf8Bytes(new{protocol=1,name=Environment.MachineName,port=Port,fingerprint=Fingerprint},Protocol.Json);
         var lastResponse=DateTimeOffset.MinValue;
         try
         {
@@ -122,20 +118,28 @@ internal sealed class HostServer : IDisposable
                 var root=message.RootElement;
                 if(Protocol.String(root,"type",16)!="auth"||Protocol.Int(root,"protocol",1,1)!=1)throw new ProtocolException("Authenticate first.");
                 if(!limiter.Allowed(DateTimeOffset.UtcNow)){await Error(ssl,"Too many pairing attempts. Wait 30 seconds.",authTimeout.Token);return;}
-                var submitted=Protocol.String(root,"pin",6);
+                var usesToken=root.TryGetProperty("token",out _);
+                if(usesToken&&root.TryGetProperty("pin",out _))throw new ProtocolException("Choose one authentication method.");
+                var submitted=usesToken?Protocol.String(root,"token",64):Protocol.String(root,"pin",6);
+                var deviceId=usesToken?Protocol.String(root,"deviceId",32):"";
+                var remember=!usesToken&&root.TryGetProperty("remember",out var rememberValue)&&rememberValue.ValueKind==JsonValueKind.True;
                 var name=Protocol.String(root,"name",100);
+                var authorized=false;
                 lock(gate)
                 {
-                    if(!Protocol.PinMatches(pin,submitted)){limiter.Failed(DateTimeOffset.UtcNow);}
+                    authorized=usesToken?pairings.Authenticate(deviceId,submitted):Protocol.PinMatches(pin,submitted);
+                    if(!authorized){limiter.Failed(DateTimeOffset.UtcNow);}
                     else if(active is null&&!serverToken.IsCancellationRequested)
                     {
-                        session=new(ssl,reader,new InputSession(inputFactory()),serverToken,mediaEnabled);
+                        var credential=remember?pairings.Issue():null;
+                        session=new(ssl,reader,new InputSession(inputFactory()),serverToken,mediaEnabled,Apps,credential);
                         active=session;
                     }
                 }
                 if(session is null)
                 {
-                    await Error(ssl,Protocol.PinMatches(Pin,submitted)?"Another tablet is connected.":"Incorrect pairing PIN.",authTimeout.Token);
+                    await Error(ssl,authorized?"Another tablet is connected.":usesToken?"Saved pairing was revoked. Pair this PC again.":"Incorrect pairing PIN.",
+                        authTimeout.Token,authorized?"busy":usesToken?"pairingRequired":"invalidPin");
                     return;
                 }
                 authTimeout.CancelAfter(Timeout.InfiniteTimeSpan);
@@ -153,14 +157,14 @@ internal sealed class HostServer : IDisposable
             handshakes.Release();
         }
     }
-    private static async Task Error(SslStream stream,string message,CancellationToken token)
+    private static async Task Error(SslStream stream,string message,CancellationToken token,string code="")
     {
-        var bytes=Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new{type="error",message},Protocol.Json)+"\n");
+        var bytes=Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new{type="error",message,code},Protocol.Json)+"\n");
         await stream.WriteAsync(bytes,token);
     }
     public void ResetPairing()
     {
-        lock(gate){pin=NewPin();active?.Dispose();}
+        lock(gate){pairings.RevokeAll();pin=NewPin();active?.Dispose();}
         StatusChanged?.Invoke(Running?"Pairing reset. Waiting for tablet":"Stopped");
     }
     public void Stop()
@@ -172,7 +176,7 @@ internal sealed class HostServer : IDisposable
         }
         StatusChanged?.Invoke("Stopped");
     }
-    public void Dispose(){Stop();certificate.Dispose();}
+    public void Dispose(){Stop();certificate.Dispose();pairings.Dispose();}
 }
 
 internal sealed class ClientSession:IDisposable
@@ -185,10 +189,13 @@ internal sealed class ClientSession:IDisposable
     private readonly Channel<JsonElement> commands=Channel.CreateBounded<JsonElement>(new BoundedChannelOptions(8){SingleReader=true,SingleWriter=true,FullMode=BoundedChannelFullMode.Wait});
     private readonly MediaBridge media=new();
     private readonly bool mediaEnabled;
+    private readonly AppCatalog apps;
+    private readonly PairingCredential? credential;
+    private readonly Channel<JsonElement> appCommands=Channel.CreateBounded<JsonElement>(new BoundedChannelOptions(4){SingleReader=true,SingleWriter=true,FullMode=BoundedChannelFullMode.Wait});
     private long heartbeat=Environment.TickCount64;
     private int disposed;
-    public ClientSession(SslStream stream,JsonLineReader reader,InputSession input,CancellationToken token,bool mediaEnabled=true)
-    {this.stream=stream;this.reader=reader;this.input=input;this.mediaEnabled=mediaEnabled;lifetime=CancellationTokenSource.CreateLinkedTokenSource(token);}
+    public ClientSession(SslStream stream,JsonLineReader reader,InputSession input,CancellationToken token,bool mediaEnabled,AppCatalog apps,PairingCredential? credential=null)
+    {this.stream=stream;this.reader=reader;this.input=input;this.mediaEnabled=mediaEnabled;this.apps=apps;this.credential=credential;lifetime=CancellationTokenSource.CreateLinkedTokenSource(token);}
     private void Send(object message)
     {
         if(!outgoing.Writer.TryWrite(message)){Dispose();throw new ProtocolException("Tablet is not reading messages.");}
@@ -196,8 +203,9 @@ internal sealed class ClientSession:IDisposable
     public async Task Run()
     {
         var leds=WindowsInput.ReadLeds();
-        Send(new{type="ready",name=Environment.MachineName,ledsKnown=false,capsLock=leds.Caps,numLock=leds.Num});
-        var tasks=new[]{Write(),Watchdog(),PollMedia(),MediaCommands(),Receive()};
+        Send(new{type="ready",name=Environment.MachineName,ledsKnown=false,capsLock=leds.Caps,numLock=leds.Num,dock=true,pcId=apps.PcId,
+            rememberSupported=true,deviceId=credential?.DeviceId,token=credential?.Token});
+        var tasks=new[]{Write(),Watchdog(),PollMedia(),MediaCommands(),AppCommands(),Receive()};
         try{await Task.WhenAny(tasks);}
         finally
         {
@@ -256,14 +264,44 @@ internal sealed class ClientSession:IDisposable
                 case "move":input.Move(Protocol.Int(root,"dx",-32767,32767),Protocol.Int(root,"dy",-32767,32767));break;
                 case "scroll":input.Scroll(Protocol.Int(root,"amount",-120,120));break;
                 case "media":if(!commands.Writer.TryWrite(root.Clone()))throw new ProtocolException("Too many media commands.");break;
+                case "apps": case "launchApp":
+                    if(!appCommands.Writer.TryWrite(root.Clone()))throw new ProtocolException("Too many app requests.");break;
                 default:throw new ProtocolException("Unsupported message.");
             }
+        }
+    }
+    private async Task AppCommands()
+    {
+        await foreach(var command in appCommands.Reader.ReadAllAsync(lifetime.Token))
+        {
+            try
+            {
+                if(Protocol.String(command,"type")=="apps")
+                {
+                    Send(new{type="appsBegin",pcId=apps.PcId});
+                    var entries=await Task.Run(()=>apps.List(lifetime.Token),lifetime.Token).WaitAsync(TimeSpan.FromSeconds(30),lifetime.Token);
+                    foreach(var entry in entries)
+                    {
+                        // Leave queue capacity for heartbeat/media frames during a large catalog.
+                        while(outgoing.Reader.Count>=8)await Task.Delay(15,lifetime.Token);
+                        await outgoing.Writer.WriteAsync(new{type="app",pcId=apps.PcId,id=entry.Id,name=entry.Name,icon=entry.Icon},lifetime.Token);
+                    }
+                    await outgoing.Writer.WriteAsync(new{type="appsEnd",pcId=apps.PcId},lifetime.Token);
+                }
+                else
+                {
+                    await Task.Run(()=>apps.Launch(Protocol.String(command,"pcId",80),Protocol.String(command,"id",80),lifetime.Token),lifetime.Token);
+                    Send(new{type="appLaunched",id=Protocol.String(command,"id",80)});
+                }
+            }
+            catch(OperationCanceledException)when(lifetime.IsCancellationRequested){throw;}
+            catch(Exception error){Send(new{type="appError",message=error.Message[..Math.Min(error.Message.Length,200)]});}
         }
     }
     public void Dispose()
     {
         if(Interlocked.Exchange(ref disposed,1)!=0)return;
-        input.Dispose();lifetime.Cancel();outgoing.Writer.TryComplete();commands.Writer.TryComplete();
+        input.Dispose();lifetime.Cancel();outgoing.Writer.TryComplete();commands.Writer.TryComplete();appCommands.Writer.TryComplete();
         try{stream.Close();}catch{}
     }
 }

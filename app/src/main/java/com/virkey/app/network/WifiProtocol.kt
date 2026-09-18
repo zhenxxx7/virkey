@@ -95,7 +95,13 @@ internal class PairingTrustManager(private val expectedFingerprint: String?) : X
 internal fun authenticationFrame(pin: String, trust: PairingTrustManager): String {
     check(trust.canAuthenticate) { "Certificate confirmation is required before sending a PIN" }
     return JSONObject().put("type", "auth").put("protocol", 1)
-        .put("pin", normalizePin(pin)).put("name", "Virkey tablet").toString()
+        .put("pin", normalizePin(pin)).put("remember", true).put("name", "Virkey tablet").toString()
+}
+
+internal fun rememberedAuthenticationFrame(credential: WifiCredential, trust: PairingTrustManager): String {
+    check(trust.canAuthenticate && trust.peerFingerprint == credential.pc.fingerprint) { "Saved PC certificate must match before reconnecting" }
+    return JSONObject().put("type", "auth").put("protocol", 1).put("name", "Virkey tablet")
+        .put("deviceId", normalizedHex(credential.deviceId, 32)).put("token", normalizedHex(credential.token, 64)).toString()
 }
 
 internal fun inputFrame(action: RemoteAction): String? {

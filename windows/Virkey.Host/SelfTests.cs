@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Security.Authentication;
 using System.Security.Cryptography;
 using System.Text;
@@ -28,14 +29,68 @@ internal static class SelfTests
     }
     public static async Task Run(Action<string> report)
     {
+        TestBranding();report("PASS nine embedded and native EXE icon resolutions, plus owned window icons");
         TestMappingAndRelease();report("PASS HID mapping, duplicate suppression, combined button masks, release and disposal");
         await TestRepeat();report("PASS rapid re-press cannot revive an old keyboard repeat task");
         await TestProtocol();report("PASS JSON framing, length/depth/type limits, truncated messages and PIN rate limit");
         await TestConnections(report);report("PASS TLS pin rejection, PIN rejection, authenticated input, second-client isolation, explicit release, disconnect, PIN reset and stop");
         await TestHeartbeat();report("PASS four-second heartbeat expiry releases held keys and buttons");
         await TestRateLimit();report("PASS pairing attempts globally rate limited over real TLS connections");
+        await TestAppCatalog();report("PASS app catalog persistence, known-ID launch, wrong-PC rejection and authenticated app commands");
+        TestArtwork();report("PASS enlarged artwork dimensions, aspect ratio, byte cap and no upscaling");
+        TestSavedPairing();report("PASS DPAPI pairing persistence, stable certificate, hashed tokens, exclusive access, revocation and corruption rejection");
+        await TestRememberedConnections();report("PASS first-pair token issuance, PIN-free reconnect after restart, bad-token rejection, busy-client isolation and reset revocation");
         report("Tests used recording input only. No Windows input or media commands injected.");
     }
+    private static void TestBranding()
+    {
+        int[] sizes=[16,20,24,32,40,48,64,128,256];
+        using var stream=typeof(Branding).Assembly.GetManifestResourceStream(Branding.IconResource)
+            ??throw new InvalidOperationException("Missing embedded application icon.");
+        using var reader=new BinaryReader(stream);
+        Check(reader.ReadUInt16()==0&&reader.ReadUInt16()==1&&reader.ReadUInt16()==sizes.Length,"Invalid multi-resolution icon header.");
+        foreach(var size in sizes)
+        {
+            var width=reader.ReadByte();var height=reader.ReadByte();
+            Check((width==0?256:width)==size&&(height==0?256:height)==size,"Missing icon size.");
+            reader.ReadBytes(2);
+            Check(reader.ReadUInt16()==1&&reader.ReadUInt16()==32,"Expected a 32-bit icon.");
+            var length=reader.ReadUInt32();var offset=reader.ReadUInt32();
+            Check(length>0&&offset>=6+16*sizes.Length&&offset+length<=stream.Length,"Invalid icon frame bounds.");
+            var nextEntry=stream.Position;
+            stream.Position=offset;
+            using var frame=new MemoryStream(reader.ReadBytes((int)length));
+            using var bitmap=new Bitmap(frame);
+            stream.Position=nextEntry;
+            Check(bitmap.Width==size&&bitmap.Height==size,$"Icon frame requested {size}px but decoded {bitmap.Width}x{bitmap.Height}.");
+            var colors=new HashSet<int>();
+            for(var y=0;y<size;y++)for(var x=0;x<size;x++)colors.Add(bitmap.GetPixel(x,y).ToArgb());
+            Check(colors.Count>2,"Icon is blank or failed to render.");
+            var extracted=PrivateExtractIcons(Environment.ProcessPath!,0,size,size,out var nativeIcon,out _,1,0);
+            try
+            {
+                Check(extracted==1&&nativeIcon!=IntPtr.Zero,"Could not extract the native EXE icon.");
+                using var shellIcon=Icon.FromHandle(nativeIcon);
+                using var shellBitmap=shellIcon.ToBitmap();
+                Check(shellBitmap.Size==bitmap.Size,"Native EXE icon has an unexpected size.");
+                for(var y=0;y<size;y++)for(var x=0;x<size;x++)
+                    Check(shellBitmap.GetPixel(x,y).ToArgb()==bitmap.GetPixel(x,y).ToArgb(),"Native EXE icon differs from the Virkey logo.");
+            }
+            finally{if(nativeIcon!=IntPtr.Zero)DestroyIcon(nativeIcon);}
+            // The .NET 8 icon selector treats the 256px directory byte as zero.
+            // Windows Explorer uses that PNG directly; forms use smaller sizes.
+            if(size<256)
+            {
+                using var icon=Branding.LoadIcon(size);
+                using var rendered=icon.ToBitmap();
+                Check(rendered.Size==bitmap.Size,"Window icon did not preserve its requested size.");
+            }
+        }
+    }
+    [DllImport("user32.dll",CharSet=CharSet.Unicode)]
+    private static extern uint PrivateExtractIcons(string fileName,int index,int width,int height,out IntPtr icon,out uint iconId,uint count,uint flags);
+    [DllImport("user32.dll")]
+    private static extern bool DestroyIcon(IntPtr icon);
     private static void TestMappingAndRelease()
     {
         for(var usage=4;usage<=0x65;usage++)Check(InputMap.TryKey(usage,out _),$"Missing keyboard usage {usage:x}.");
@@ -55,6 +110,98 @@ internal static class SelfTests
         input.Dispose();var count=sink.Events.Count;
         input.Key(4,true);input.Button(1,true);input.Move(1,1);
         Check(sink.Events.Count==count,"Input after disposal escaped.");
+    }
+    private static void TestArtwork()
+    {
+        using var large=new Bitmap(1200,800);
+        using(var graphics=Graphics.FromImage(large))graphics.Clear(Color.CadetBlue);
+        var encoded=MediaBridge.EncodeArtwork(large);
+        Check(encoded is {Length:>0 and <=262144},"Artwork exceeded the protocol byte cap.");
+        using var stream=new MemoryStream(encoded!);
+        using var decoded=Image.FromStream(stream);
+        Check(decoded.Width==640&&decoded.Height==426,"Enlarged artwork lost its resolution or aspect ratio.");
+        using var small=new Bitmap(120,120);
+        using var smallStream=new MemoryStream(MediaBridge.EncodeArtwork(small)!);
+        using var smallDecoded=Image.FromStream(smallStream);
+        Check(smallDecoded.Width==120&&smallDecoded.Height==120,"Small artwork should not be upscaled.");
+        using var oversized=new Bitmap(8193,1);
+        Check(MediaBridge.EncodeArtwork(oversized) is null,"Oversized source artwork accepted.");
+    }
+    private static void TestSavedPairing()
+    {
+        var directory=Directory.CreateTempSubdirectory("virkey-pairing-test-");
+        var path=Path.Combine(directory.FullName,"pairing.dat");
+        try
+        {
+            PairingCredential first;string fingerprint;
+            using(var saved=new PairingStore(path))
+            {
+                using var cert=saved.OpenCertificate();fingerprint=Convert.ToHexString(SHA256.HashData(cert.RawData));
+                first=saved.Issue();Check(saved.Authenticate(first.DeviceId,first.Token),"New credential rejected.");
+                Check(!saved.Authenticate(first.DeviceId,new string('0',64)),"Incorrect token accepted.");
+                Check(!Encoding.UTF8.GetString(File.ReadAllBytes(path)).Contains(first.Token),"Token stored in clear text.");
+                try{using var second=new PairingStore(path);throw new InvalidOperationException("Two writers accepted.");}catch(IOException){}
+            }
+            using(var saved=new PairingStore(path))
+            {
+                using var cert=saved.OpenCertificate();Check(Convert.ToHexString(SHA256.HashData(cert.RawData))==fingerprint,"Host identity changed on restart.");
+                Check(saved.Authenticate(first.DeviceId,first.Token),"Persisted credential rejected.");
+                for(var index=0;index<16;index++)saved.Issue();
+                Check(saved.Count==16&&!saved.Authenticate(first.DeviceId,first.Token),"Trusted-device bound failed.");
+                saved.RevokeAll();Check(saved.Count==0,"Revocation failed.");
+            }
+            using(var saved=new PairingStore(path))Check(saved.Count==0&&!saved.Authenticate(first.DeviceId,first.Token),"Revocation did not survive restart.");
+            var corrupt=File.ReadAllBytes(path);corrupt[^1]^=1;File.WriteAllBytes(path,corrupt);
+            try{using var saved=new PairingStore(path);throw new InvalidOperationException("Corrupt trust store accepted.");}catch(CryptographicException){}
+            Check(File.ReadAllBytes(path).SequenceEqual(corrupt),"Corrupt identity was silently replaced.");
+        }
+        finally{foreach(var suffix in new[]{"",".tmp",".lock"})File.Delete(path+suffix);directory.Delete();}
+    }
+    private static async Task TestRememberedConnections()
+    {
+        var directory=Directory.CreateTempSubdirectory("virkey-reconnect-test-");
+        var path=Path.Combine(directory.FullName,"pairing.dat");
+        try
+        {
+            string deviceId,token,fingerprint;
+            using(var host=new HostServer(()=>new RecordingInput(),mediaEnabled:false,pairings:new PairingStore(path)))
+            {
+                host.Start(loopbackOnly:true,port:0);fingerprint=host.Fingerprint;
+                using var client=await TestClient.Open(host);
+                await client.Send(new{type="auth",protocol=1,pin=host.Pin,remember=true,name="Pairing test"});
+                using var ready=await client.Type("ready");
+                deviceId=ready.RootElement.GetProperty("deviceId").GetString()!;token=ready.RootElement.GetProperty("token").GetString()!;
+                Check(deviceId.Length==32&&token.Length==64,"Missing reconnect credential.");
+            }
+            var sink=new RecordingInput();
+            using(var host=new HostServer(()=>sink,mediaEnabled:false,pairings:new PairingStore(path)))
+            {
+                Check(host.Fingerprint==fingerprint,"Restart changed trusted certificate.");host.Start(loopbackOnly:true,port:0);
+                using(var bad=await TestClient.Open(host))
+                {
+                    await bad.Send(new{type="auth",protocol=1,deviceId,token=new string('0',64),name="Bad token"});
+                    using var error=await bad.Type("error");Check(error.RootElement.GetProperty("code").GetString()=="pairingRequired","Bad token did not require re-pairing.");
+                    Check(sink.Events.Count==0,"Unauthorized input was created.");
+                }
+                using var client=await TestClient.Open(host,fingerprint);
+                await client.Send(new{type="auth",protocol=1,deviceId,token,name="Remembered tablet"});
+                using var ready=await client.Type("ready");
+                Check(ready.RootElement.GetProperty("token").ValueKind==JsonValueKind.Null,"Reconnect should not rotate the token before client acknowledgement.");
+                await client.Send(new{type="key",usage=4,down=true});await client.Barrier();
+                using(var second=await TestClient.Open(host))
+                {
+                    await second.Send(new{type="auth",protocol=1,deviceId,token,name="Second client"});
+                    using var error=await second.Type("error");Check(error.RootElement.GetProperty("code").GetString()=="busy","Second client bypassed isolation.");
+                }
+                Check(!sink.Events.Any(e=>e.StartsWith("K")&&e.EndsWith("False")),"Rejected client released the first client's keys.");
+                host.ResetPairing();await Until(()=>sink.Events.Count>=2);
+                using var revoked=await TestClient.Open(host);
+                await revoked.Send(new{type="auth",protocol=1,deviceId,token,name="Revoked tablet"});
+                using var rejection=await revoked.Type("error");
+                Check(rejection.RootElement.GetProperty("code").GetString()=="pairingRequired","Reset did not revoke the reconnect token.");
+            }
+        }
+        finally{foreach(var suffix in new[]{"",".tmp",".lock"})File.Delete(path+suffix);directory.Delete();}
     }
     private static async Task TestRepeat()
     {
@@ -152,6 +299,50 @@ internal static class SelfTests
         Check(reply.RootElement.GetProperty("message").GetString()!.Contains("Too many"),"Pairing limiter bypassed across clients.");
         Check(sink.Events.Count==0,"Authentication tests injected input.");
     }
+    private static async Task TestAppCatalog()
+    {
+        var folder=Path.Combine(Path.GetTempPath(),"virkey-app-test-"+Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        try
+        {
+            var path=Path.Combine(folder,"Sample.exe");
+            File.WriteAllText(path,"Test fixture: never executed");
+            var config=Path.Combine(folder,"apps.json");
+            var launched=new List<string>();
+            var catalog=new AppCatalog([],config,launched.Add);
+            catalog.Add(path);
+            var reopened=new AppCatalog([],config,launched.Add);
+            Check(reopened.PcId==catalog.PcId&&reopened.ManualPaths.SequenceEqual([path]),"Saved app settings lost PC identity or paths.");
+            var entries=catalog.List(default,icons:false);
+            Check(entries.Count==1&&entries[0].Name=="Sample","Manual app missing from catalog.");
+            var id=entries[0].Id;
+            try{catalog.Launch("another-pc",id,default);throw new Exception("Wrong PC was accepted.");}catch(InvalidOperationException){}
+            try{catalog.Launch(catalog.PcId,path,default);throw new Exception("Raw launch path was accepted.");}catch(InvalidOperationException){}
+            Check(launched.Count==0,"Rejected app command launched a process.");
+            catalog.Launch(catalog.PcId,id,default);
+            Check(launched.SequenceEqual([path]),"Known app did not reach the recording launcher.");
+            Check(!AppCatalog.IsLocalTarget(@"\\server\share\app.exe")&&!AppCatalog.IsLocalTarget("cmd /c echo hi")&&!AppCatalog.IsLocalTarget(Path.Combine(folder,"run.ps1")),"Arbitrary target allowed.");
+
+            using var host=new HostServer(()=>new RecordingInput(),mediaEnabled:false,apps:catalog);
+            host.Start(loopbackOnly:true,port:0);
+            using var client=await TestClient.Authenticate(host);
+            await client.Send(new{type="apps"});
+            using var entry=await client.Type("app");
+            Check(entry.RootElement.GetProperty("id").GetString()==id,"Catalog wire ID changed.");
+            using var completed=await client.Type("appsEnd");
+            await client.Send(new{type="launchApp",pcId=catalog.PcId,id});
+            using var opened=await client.Type("appLaunched");
+            Check(launched.Count==2,"Authenticated app was not dispatched.");
+            await client.Send(new{type="launchApp",pcId="wrong",id});
+            using var rejected=await client.Type("appError");
+            Check(launched.Count==2,"Mismatched PC ID launched an app.");
+            catalog.Remove(path);
+            Check(catalog.List(default,icons:false).Count==0,"Removed manual app remained in catalog.");
+            Check(new AppCatalog([],config,launched.Add).ManualPaths.Length==0,"App removal did not persist.");
+        }
+        finally { Directory.Delete(folder,true); }
+    }
+
     private sealed class RecordingInput:IInputSink
     {
         public ConcurrentQueue<string> Events{get;}=new();

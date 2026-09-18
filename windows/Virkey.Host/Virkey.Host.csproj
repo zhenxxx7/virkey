@@ -6,8 +6,12 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>Virkey.Host</AssemblyName>
-    <Version>0.3.0</Version>
+    <ApplicationIcon>Assets\virkey.ico</ApplicationIcon>
+    <Version>0.6.0</Version>
     <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
   </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Assets\virkey.ico" LogicalName="Virkey.Host.Assets.virkey.ico" />
+  </ItemGroup>
 </Project>

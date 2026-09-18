@@ -116,15 +116,25 @@ internal sealed class MediaBridge
             var bytes=new byte[size];reader.ReadBytes(bytes);
             using var source=new MemoryStream(bytes);
             using var image=Image.FromStream(source);
-            if(image.Width>8192||image.Height>8192)return null;
-            var scale=Math.Min(1,320d/Math.Max(image.Width,image.Height));
-            using var bitmap=new Bitmap(Math.Max(1,(int)(image.Width*scale)),Math.Max(1,(int)(image.Height*scale)));
-            using(var graphics=Graphics.FromImage(bitmap)){graphics.InterpolationMode=InterpolationMode.HighQualityBicubic;graphics.DrawImage(image,0,0,bitmap.Width,bitmap.Height);}
-            using var output=new MemoryStream();bitmap.Save(output,ImageFormat.Jpeg);
-            return output.Length<=262144?output.ToArray():null;
+            return EncodeArtwork(image);
         }
         catch(OperationCanceledException)when(token.IsCancellationRequested){throw;}
         catch{return null;}
+    }
+
+    internal static byte[]? EncodeArtwork(Image image)
+    {
+        if(image.Width>8192||image.Height>8192)return null;
+        // Keep enlarged tablet artwork sharp without changing the protocol's byte cap.
+        foreach(var edge in new[]{640,320})
+        {
+            var scale=Math.Min(1,(double)edge/Math.Max(image.Width,image.Height));
+            using var bitmap=new Bitmap(Math.Max(1,(int)(image.Width*scale)),Math.Max(1,(int)(image.Height*scale)));
+            using(var graphics=Graphics.FromImage(bitmap)){graphics.InterpolationMode=InterpolationMode.HighQualityBicubic;graphics.DrawImage(image,0,0,bitmap.Width,bitmap.Height);}
+            using var output=new MemoryStream();bitmap.Save(output,ImageFormat.Jpeg);
+            if(output.Length<=262144)return output.ToArray();
+        }
+        return null;
     }
 
     public async Task<string?> Command(JsonElement message,CancellationToken token)

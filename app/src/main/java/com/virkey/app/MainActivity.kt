@@ -30,7 +30,13 @@ import com.virkey.app.ui.RemoteUiState
 import com.virkey.app.ui.VirkeyScreen
 import com.virkey.app.ui.ConnectionMode
 import com.virkey.app.network.WifiController
+import com.virkey.app.network.EncryptedWifiPairingStore
+import com.virkey.app.dock.DockItem
+import com.virkey.app.dock.DockKind
+import com.virkey.app.dock.DockStore
+import com.virkey.app.dock.Hotkeys
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -41,10 +47,15 @@ class MainActivity : ComponentActivity() {
     private var pendingAction: RemoteAction? = null
     private var pairingJob: Job? = null
     private var acceptsInput = false
-    private val wifiController by lazy { WifiController() }
+    private val wifiController by lazy { WifiController(EncryptedWifiPairingStore(this)) }
     private var connectionMode by mutableStateOf(ConnectionMode.BLUETOOTH)
     private var pendingWifiAddress = ""
     private var pendingWifiPin = ""
+    private val dockStore by lazy { DockStore(this) }
+    private var shortcutBusy by mutableStateOf(false)
+    private var shortcutJob: Job? = null
+    private var shortcutEpoch = 0L
+    private var shortcutRelease: (() -> Unit)? = null
 
     private val permissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         inputService?.controller?.refreshEnvironment()
@@ -76,6 +87,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        connectionMode = runCatching { ConnectionMode.valueOf(getSharedPreferences("connection", Context.MODE_PRIVATE)
+            .getString("last_mode", ConnectionMode.BLUETOOTH.name).orEmpty()) }.getOrDefault(ConnectionMode.BLUETOOTH)
         enableEdgeToEdge()
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         bound = bindService(Intent(this, BluetoothInputService::class.java), connection, Context.BIND_AUTO_CREATE)
@@ -84,6 +97,7 @@ class MainActivity : ComponentActivity() {
             val bluetoothState = if (service != null) service.controller.state.collectAsStateWithLifecycle().value
                 else RemoteUiState(statusMessage = "Opening keyboard…")
             val wifiState by wifiController.state.collectAsStateWithLifecycle()
+            val dockItems by dockStore.items.collectAsStateWithLifecycle()
             val state = if (connectionMode == ConnectionMode.BLUETOOTH) bluetoothState else RemoteUiState(
                 permissionsReady = true, bluetoothEnabled = true, isSupported = true, isRegistered = true,
                 isConnected = wifiState.isConnected, connectedName = wifiState.hostName.ifBlank { "Wi-Fi PC" },
@@ -96,6 +110,7 @@ class MainActivity : ComponentActivity() {
                 wifiState = wifiState,
                 onModeChange = ::changeConnectionMode,
                 onWifiConnect = { address, pin ->
+                    cancelShortcut()
                     pendingWifiAddress = address
                     pendingWifiPin = pin
                     wifiController.connect(address, pin)
@@ -108,8 +123,10 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 },
-                onWifiDisconnect = { pendingWifiPin = ""; wifiController.disconnect() },
+                onWifiDisconnect = { cancelShortcut(); pendingWifiPin = ""; wifiController.disconnect() },
                 onWifiDiscover = { wifiController.discover() },
+                onWifiReconnect = { address -> cancelShortcut(); pendingWifiPin = ""; wifiController.reconnectSaved(address) },
+                onWifiForget = { cancelShortcut(); pendingWifiPin = ""; wifiController.forgetPc() },
                 onMedia = { command, position, enabled, mode ->
                     if (acceptsInput && connectionMode == ConnectionMode.WIFI) {
                         // Bind commands to the displayed track, not a newer unseen track.
@@ -118,6 +135,13 @@ class MainActivity : ComponentActivity() {
                     }
                 },
                 onAction = ::handleAction,
+                dockItems = dockItems,
+                shortcutBusy = shortcutBusy,
+                onDockRun = ::runDockItem,
+                onDockSave = dockStore::save,
+                onDockRemove = dockStore::remove,
+                onDockMove = dockStore::move,
+                onAppsRefresh = wifiController::requestApps,
             )
         }
     }
@@ -129,6 +153,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onPause() {
+        cancelShortcut()
         acceptsInput = false
         pairingJob?.cancel()
         inputService?.controller?.releaseAll()
@@ -147,6 +172,7 @@ class MainActivity : ComponentActivity() {
 
     @SuppressLint("MissingPermission")
     private fun handleAction(action: RemoteAction) {
+        if (action == RemoteAction.ReleaseAll || action == RemoteAction.Disconnect) cancelShortcut()
         // A delayed gesture callback must not re-press input after onPause's release.
         if (!acceptsInput && when (action) {
                 is RemoteAction.KeyDown, is RemoteAction.MediaDown, is RemoteAction.MouseDown,
@@ -210,6 +236,7 @@ class MainActivity : ComponentActivity() {
 
     private fun changeConnectionMode(mode: ConnectionMode) {
         if (mode == connectionMode) return
+        cancelShortcut()
         pairingJob?.cancel()
         pendingAction = null
         pendingWifiPin = ""
@@ -217,6 +244,57 @@ class MainActivity : ComponentActivity() {
         inputService?.controller?.releaseAll()
         if (connectionMode == ConnectionMode.BLUETOOTH) inputService?.controller?.disconnect()
         connectionMode = mode
+        getSharedPreferences("connection", Context.MODE_PRIVATE).edit().putString("last_mode", mode.name).apply()
+    }
+
+    private fun cancelShortcut() {
+        shortcutEpoch++
+        shortcutJob?.cancel()
+        shortcutJob = null
+        shortcutRelease?.invoke()
+        shortcutRelease = null
+        shortcutBusy = false
+    }
+
+    private fun runDockItem(item: DockItem) {
+        if (!acceptsInput || shortcutBusy) return
+        if (item.kind == DockKind.APP) {
+            if (connectionMode == ConnectionMode.WIFI) wifiController.launchApp(item.pcId, item.appId)
+            return
+        }
+        if (runCatching { Hotkeys.parse(item.hotkey) }.isFailure) return
+        val bluetooth = inputService?.controller
+        val mode = connectionMode
+        if (mode == ConnectionMode.WIFI && !wifiController.state.value.isConnected) return
+        if (mode == ConnectionMode.BLUETOOTH && bluetooth?.state?.value?.isConnected != true) return
+        val epoch = ++shortcutEpoch
+        val send: (RemoteAction) -> Unit = { action ->
+            if (epoch == shortcutEpoch) {
+                if (mode == ConnectionMode.WIFI) wifiController.send(action)
+                else when (action) {
+                    is RemoteAction.KeyDown -> bluetooth?.keyDown(action.usage)
+                    is RemoteAction.KeyUp -> bluetooth?.keyUp(action.usage)
+                    else -> Unit
+                }
+            }
+        }
+        shortcutRelease = {
+            if (mode == ConnectionMode.WIFI) wifiController.send(RemoteAction.ReleaseAll) else bluetooth?.releaseAll()
+        }
+        shortcutBusy = true
+        shortcutJob = lifecycleScope.launch {
+            try {
+                // Let active touch handlers finish their releases before the chord begins.
+                delay(32)
+                Hotkeys.play(item.hotkey, send)
+            } finally {
+                if (epoch == shortcutEpoch) {
+                    shortcutRelease = null
+                    shortcutBusy = false
+                    shortcutJob = null
+                }
+            }
+        }
     }
 
     private fun ensureBluetoothReady(action: RemoteAction): Boolean {

@@ -23,6 +23,165 @@ import javax.net.ssl.SSLSocket
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class WifiControllerTest {
+    private val deviceId = "ab".repeat(16)
+    private val token = "cd".repeat(32)
+    private fun saved(address: String, fingerprint: String = TestTlsIdentity.fingerprint) =
+        WifiCredential(SavedWifiPc(address, "Remembered PC", fingerprint), deviceId, token)
+
+    @Test fun firstPairSavesCredentialAndRecreatedControllerReconnectsWithoutPin() {
+        val store = MemoryWifiPairingStore()
+        val finish = CountDownLatch(1)
+        LocalHost { server ->
+            server.acceptClient().use { socket ->
+                val reader = socket.inputStream.bufferedReader()
+                val auth = JSONObject(reader.readLine())
+                assertEquals("123456", auth.getString("pin"))
+                assertTrue(auth.getBoolean("remember"))
+                socket.outputStream.bufferedWriter().frame("""{"type":"ready","name":"Remembered PC","rememberSupported":true,"deviceId":"$deviceId","token":"$token"}""")
+                reader.readLine() // Explicit disconnect/release, not input replay.
+            }
+            server.acceptClient().use { socket ->
+                val auth = JSONObject(socket.inputStream.bufferedReader().readLine())
+                assertFalse(auth.has("pin"))
+                assertEquals(deviceId, auth.getString("deviceId"))
+                assertEquals(token, auth.getString("token"))
+                socket.outputStream.bufferedWriter().frame("""{"type":"ready","name":"Remembered PC","rememberSupported":true}""")
+                assertTrue(finish.await(5, TimeUnit.SECONDS))
+            }
+        }.use { host ->
+            WifiController(store).use { controller ->
+                controller.connect(host.address, "123456", TestTlsIdentity.fingerprint)
+                waitUntil { controller.state.value.isConnected }
+                assertEquals(host.address, controller.state.value.savedPc?.address)
+                assertFalse(controller.state.value.toString().contains(token))
+                controller.disconnect()
+            }
+            WifiController(store).use { controller ->
+                waitUntil { !controller.state.value.loadingSavedPc }
+                controller.reconnectSaved()
+                waitUntil { controller.state.value.isConnected }
+                assertNull(controller.state.value.pendingFingerprint)
+                finish.countDown(); host.assertCompleted()
+            }
+        }
+    }
+
+    @Test fun savedCredentialIsNeverSentToChangedCertificate() {
+        val received = AtomicReference<String?>()
+        LocalHost { server ->
+            server.acceptClient().use { socket ->
+                try { socket.startHandshake(); received.set(socket.inputStream.bufferedReader().readLine()) } catch (_: IOException) { }
+            }
+        }.use { host ->
+            val store = MemoryWifiPairingStore().apply { save(saved(host.address, "00".repeat(32))) }
+            WifiController(store, { _, _ -> emptyList() }).use { controller ->
+                waitUntil { !controller.state.value.loadingSavedPc }
+                controller.reconnectSaved()
+                waitUntil { !controller.state.value.isConnecting }
+                host.assertCompleted()
+                assertNull(received.get())
+                assertTrue(controller.state.value.pairingRequired)
+                assertEquals("00".repeat(32), store.load()?.pc?.fingerprint)
+            }
+        }
+    }
+
+    @Test fun revokedCredentialRequiresPairingAndDoesNotFallBackToPinOrDiscovery() {
+        LocalHost { server ->
+            server.acceptClient().use { socket ->
+                val auth = JSONObject(socket.inputStream.bufferedReader().readLine())
+                assertFalse(auth.has("pin"))
+                socket.outputStream.bufferedWriter().frame("""{"type":"error","code":"pairingRequired","message":"Saved pairing was revoked."}""")
+            }
+        }.use { host ->
+            val store = MemoryWifiPairingStore().apply { save(saved(host.address)) }
+            WifiController(store, { _, _ -> error("Authentication failure must not trigger discovery") }).use { controller ->
+                waitUntil { !controller.state.value.loadingSavedPc }
+                controller.reconnectSaved()
+                waitUntil { !controller.state.value.isConnecting }
+                assertTrue(controller.state.value.pairingRequired)
+                assertFalse(controller.state.value.isConnected)
+                assertNotNull(store.load())
+                host.assertCompleted()
+            }
+        }
+    }
+
+    @Test fun changedAddressIsRediscoveredButOriginalCertificateRemainsPinned() {
+        val oldAddress = java.net.ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+        val finish = CountDownLatch(1)
+        LocalHost { server ->
+            server.acceptClient().use { socket ->
+                val auth = JSONObject(socket.inputStream.bufferedReader().readLine())
+                assertEquals(token, auth.getString("token")); assertFalse(auth.has("pin"))
+                socket.outputStream.bufferedWriter().frame("""{"type":"ready","name":"Moved PC","rememberSupported":true}""")
+                assertTrue(finish.await(5, TimeUnit.SECONDS))
+            }
+        }.use { host ->
+            val store = MemoryWifiPairingStore().apply { save(saved("127.0.0.1:${oldAddress.localPort}")) }
+            oldAddress.close()
+            var scans = 0
+            WifiController(store, { _, _ -> scans++; listOf(WifiHost(host.address, "Moved PC", TestTlsIdentity.fingerprint)) }).use { controller ->
+                waitUntil { !controller.state.value.loadingSavedPc }
+                controller.reconnectSaved()
+                waitUntil { controller.state.value.isConnected }
+                assertEquals(1, scans)
+                assertEquals(host.address, store.load()?.pc?.address)
+                assertEquals(TestTlsIdentity.fingerprint, store.load()?.pc?.fingerprint)
+                finish.countDown(); host.assertCompleted()
+            }
+        }
+    }
+
+    @Test fun forgettingClearsPersistentCredentialAndCannotBeUndoneByLateReady() {
+        val sendReady = CountDownLatch(1)
+        val received = CountDownLatch(1)
+        LocalHost { server ->
+            server.acceptClient().use { socket ->
+                socket.inputStream.bufferedReader().readLine(); received.countDown()
+                assertTrue(sendReady.await(5, TimeUnit.SECONDS))
+                try { socket.outputStream.bufferedWriter().frame("""{"type":"ready","name":"PC","rememberSupported":true,"deviceId":"$deviceId","token":"$token"}""") }
+                catch (_: IOException) { }
+            }
+        }.use { host ->
+            val store = MemoryWifiPairingStore().apply { save(saved(host.address)) }
+            WifiController(store).use { controller ->
+                waitUntil { !controller.state.value.loadingSavedPc }
+                controller.connect(host.address, "123456", TestTlsIdentity.fingerprint)
+                assertTrue(received.await(5, TimeUnit.SECONDS))
+                controller.forgetPc()
+                waitUntil { !controller.state.value.loadingSavedPc }
+                sendReady.countDown(); host.assertCompleted()
+                assertNull(store.load()); assertNull(controller.state.value.savedPc)
+                assertFalse(controller.state.value.isConnected)
+            }
+        }
+    }
+
+    @Test fun credentialSaveFailureDoesNotPretendPcWasRemembered() {
+        val store = object : WifiPairingStore {
+            override fun load(): WifiCredential? = null
+            override fun save(credential: WifiCredential) { throw IOException("No space") }
+            override fun clear() = Unit
+        }
+        val finish = CountDownLatch(1)
+        LocalHost { server ->
+            server.acceptClient().use { socket ->
+                socket.inputStream.bufferedReader().readLine()
+                socket.outputStream.bufferedWriter().frame("""{"type":"ready","name":"PC","rememberSupported":true,"deviceId":"$deviceId","token":"$token"}""")
+                assertTrue(finish.await(5, TimeUnit.SECONDS))
+            }
+        }.use { host ->
+            WifiController(store).use { controller ->
+                controller.connect(host.address, "123456", TestTlsIdentity.fingerprint)
+                waitUntil { controller.state.value.isConnected }
+                assertNull(controller.state.value.savedPc)
+                assertTrue(controller.state.value.status.contains("could not save"))
+                finish.countDown(); host.assertCompleted()
+            }
+        }
+    }
+
     @Test fun inspectionClosesWithoutSendingPinAndLeavesConfirmationPending() {
         val received = AtomicReference<String?>("not-read")
         LocalHost { server ->
@@ -219,6 +378,45 @@ class WifiControllerTest {
                 }
                 controller.send(RemoteAction.KeyDown(7))
                 assertTrue(secondReceived.await(5, TimeUnit.SECONDS))
+                finish.countDown()
+                host.assertCompleted()
+            }
+        }
+    }
+
+    @Test fun dockCatalogUsesConnectedPcIdentityAndNeverSendsRawPaths() {
+        val received = CountDownLatch(1)
+        val finish = CountDownLatch(1)
+        LocalHost { server ->
+            server.acceptClient().use { socket ->
+                val reader = socket.inputStream.bufferedReader()
+                val writer = socket.outputStream.bufferedWriter()
+                reader.readLine()
+                writer.frame("""{"type":"ready","name":"Dock PC","dock":true,"pcId":"this-pc"}""")
+                assertEquals("apps", reader.applicationFrame(writer).getString("type"))
+                writer.frame("""{"type":"appsBegin","pcId":"this-pc"}""")
+                writer.frame("""{"type":"app","pcId":"wrong-pc","id":"wrong","name":"Wrong app"}""")
+                writer.frame("""{"type":"app","pcId":"this-pc","id":"music","name":"Music","icon":""}""")
+                writer.frame("""{"type":"appsEnd","pcId":"this-pc"}""")
+                val command = reader.applicationFrame(writer)
+                assertEquals("launchApp", command.getString("type"))
+                assertEquals("this-pc", command.getString("pcId"))
+                assertEquals("music", command.getString("id"))
+                assertFalse(command.has("path"))
+                received.countDown()
+                assertTrue(finish.await(5, TimeUnit.SECONDS))
+            }
+        }.use { host ->
+            WifiController().use { controller ->
+                controller.connect(host.address, "123456", TestTlsIdentity.fingerprint)
+                waitUntil { controller.state.value.apps.isNotEmpty() && !controller.state.value.appsLoading }
+                assertEquals(listOf("music"), controller.state.value.apps.map { it.id })
+                controller.launchApp("wrong-pc", "wrong")
+                controller.launchApp("this-pc", "music")
+                assertTrue(received.await(5, TimeUnit.SECONDS))
+                controller.disconnect()
+                assertTrue(controller.state.value.apps.isEmpty())
+                assertFalse(controller.state.value.dockSupported)
                 finish.countDown()
                 host.assertCompleted()
             }

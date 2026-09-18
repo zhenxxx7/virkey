@@ -1,8 +1,9 @@
 package com.virkey.app.network
 
 import android.graphics.Bitmap
+import com.virkey.app.dock.PcApp
 
-data class WifiHost(val address: String, val name: String)
+data class WifiHost(val address: String, val name: String, val fingerprint: String? = null)
 
 data class WifiState(
     val isConnected: Boolean = false,
@@ -16,6 +17,15 @@ data class WifiState(
     val nowPlaying: NowPlayingState = NowPlayingState(),
     val hosts: List<WifiHost> = emptyList(),
     val isDiscovering: Boolean = false,
+    val dockSupported: Boolean = false,
+    val pcId: String = "",
+    val apps: List<PcApp> = emptyList(),
+    val appsLoading: Boolean = false,
+    val appMessage: String = "",
+    val savedPc: SavedWifiPc? = null,
+    val loadingSavedPc: Boolean = false,
+    val pairingRequired: Boolean = false,
+    val rememberedConnection: Boolean = false,
 )
 
 data class NowPlayingState(

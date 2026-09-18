@@ -4,14 +4,16 @@ namespace Virkey.Host;
 
 internal sealed class HostForm:Form
 {
-    private readonly HostServer server=new();
+    private readonly HostServer server;
     private readonly NotifyIcon tray;
+    private readonly Icon applicationIcon;
     private readonly Label status=new(){AutoSize=true,Text="Stopped"};
     private readonly TextBox addresses=new(){ReadOnly=true,Multiline=true,Height=60,BorderStyle=BorderStyle.None,BackColor=Color.FromArgb(27,32,35),ForeColor=Color.White};
     private readonly Label pin=new(){AutoSize=true,Font=new Font("Segoe UI",28,FontStyle.Bold)};
     private readonly Label fingerprint=new(){AutoSize=true,Font=new Font("Consolas",15)};
     private readonly Button start=new(){Text="Start host",AutoSize=true};
-    private readonly Button reset=new(){Text="New pairing PIN",AutoSize=true};
+    private readonly Button reset=new(){Text="Reset pairing",AutoSize=true};
+    private readonly Button appsButton=new(){Text="Extra apps…",AutoSize=true};
     private bool exiting;
     private bool cleaned;
     private readonly bool preview;
@@ -19,11 +21,13 @@ internal sealed class HostForm:Form
     public HostForm(bool preview=false)
     {
         this.preview=preview;
+        server=new HostServer(apps:preview?new AppCatalog([]):null,pairings:preview?new PairingStore():null);
         Text="Virkey Host";StartPosition=FormStartPosition.CenterScreen;
         MinimumSize=new Size(620,680);Size=new Size(700,760);
         BackColor=Color.FromArgb(27,32,35);ForeColor=Color.FromArgb(234,237,231);
-        Font=new Font("Segoe UI",10);Icon=SystemIcons.Application;
-        foreach(var button in new[]{start,reset})
+        applicationIcon=Branding.LoadIcon();
+        Font=new Font("Segoe UI",10);Icon=applicationIcon;
+        foreach(var button in new[]{start,reset,appsButton})
         {
             button.FlatStyle=FlatStyle.Flat;button.BackColor=Color.FromArgb(43,50,54);
             button.ForeColor=Color.FromArgb(234,237,231);button.Padding=new Padding(12,6,12,6);
@@ -33,7 +37,7 @@ internal sealed class HostForm:Form
         Controls.Add(layout);
         void Add(Control control){control.Margin=new Padding(0,0,0,14);control.Anchor=AnchorStyles.Left|AnchorStyles.Right;layout.Controls.Add(control);}
         Add(new Label{Text="VIRKEY  /  WINDOWS HOST",AutoSize=true,Font=new Font("Segoe UI",16,FontStyle.Bold),ForeColor=Color.FromArgb(142,220,192)});
-        Add(new Label{Text="Connect your tablet and PC to the same network. Start the host, then select Wi-Fi in Virkey.",AutoSize=true,MaximumSize=new Size(580,0)});
+        Add(new Label{Text="Connect your tablet and PC to the same network. Pair once, then reconnect without a PIN. Reset pairing forgets trusted tablets.",AutoSize=true,MaximumSize=new Size(580,0)});
         Add(status);
         Add(new Label{Text="PC address",AutoSize=true});
         Add(addresses);
@@ -42,7 +46,8 @@ internal sealed class HostForm:Form
         Add(new Label{Text="Compare this fingerprint on your tablet before trusting the connection",AutoSize=true});
         Add(fingerprint);
         var buttons=new FlowLayoutPanel{AutoSize=true,FlowDirection=FlowDirection.LeftToRight};
-        buttons.Controls.Add(start);buttons.Controls.Add(reset);Add(buttons);
+        appsButton.Click+=(_,_)=>{using var dialog=new AppCatalogForm(server.Apps);dialog.ShowDialog(this);};
+        buttons.Controls.Add(start);buttons.Controls.Add(reset);buttons.Controls.Add(appsButton);Add(buttons);
         Add(new Label{Text="If Windows asks, allow access on your private network. Closing this window keeps the host in the system tray. Stop or Exit releases all held input.",AutoSize=true,MaximumSize=new Size(580,0),ForeColor=Color.FromArgb(145,156,157),Font=new Font("Segoe UI",9)});
         var menu=new ContextMenuStrip();
         menu.Items.Add("Show Virkey Host",null,(_,_)=>ShowWindow());
@@ -55,7 +60,10 @@ internal sealed class HostForm:Form
             try{if(server.Running)server.Stop();else server.Start();RefreshDetails();}
             catch(Exception ex){status.Text="Could not start: "+ex.Message;RefreshDetails();}
         };
-        reset.Click+=(_,_)=>{server.ResetPairing();RefreshDetails();};
+        reset.Click+=(_,_)=>{
+            if(MessageBox.Show(this,"Forget all trusted tablets, disconnect input and generate a new pairing PIN?","Reset pairing",MessageBoxButtons.YesNo,MessageBoxIcon.Warning)!=DialogResult.Yes)return;
+            try{server.ResetPairing();RefreshDetails();}catch(Exception){status.Text="Could not save pairing reset. Stop the host and check file permissions.";}
+        };
         server.StatusChanged+=OnStatus;
         if(!preview)SystemEvents.PowerModeChanged+=PowerChanged;
         RefreshDetails();
@@ -93,7 +101,7 @@ internal sealed class HostForm:Form
     }
     protected override void Dispose(bool disposing)
     {
-        if(disposing)Cleanup();
+        if(disposing){Cleanup();Icon=null;applicationIcon.Dispose();}
         base.Dispose(disposing);
     }
 }

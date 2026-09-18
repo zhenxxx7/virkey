@@ -1,6 +1,8 @@
 package com.virkey.app.network
 
 import com.virkey.app.ui.RemoteAction
+import com.virkey.app.dock.PcApp
+import com.virkey.app.dock.decodeDockIcon
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -33,14 +35,39 @@ import javax.net.ssl.SSLHandshakeException
 import javax.net.ssl.SSLSocket
 
 /** A single authenticated input connection. Nothing queued survives disconnect/reconnect. */
-class WifiController : AutoCloseable {
+class WifiController internal constructor(
+    private val pairings: WifiPairingStore,
+    private val scan: (alive: () -> Boolean, found: (WifiHost) -> Unit) -> List<WifiHost> = ::scanWifiHosts,
+) : AutoCloseable {
+    constructor() : this(MemoryWifiPairingStore())
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val lock = Any()
-    private val mutableState = MutableStateFlow(WifiState())
+    private val mutableState = MutableStateFlow(WifiState(loadingSavedPc = true))
     val state: StateFlow<WifiState> = mutableState.asStateFlow()
     private var current: Connection? = null
     private var closed = false
     private var discoveryEpoch = 0L
+    private var pairingRevision = 0L
+    private var savedCredential: WifiCredential? = null
+
+    init {
+        scope.launch {
+            try {
+                val saved = pairings.load()
+                synchronized(lock) {
+                    if (!closed && pairingRevision == 0L) {
+                        savedCredential = saved
+                        mutableState.value = mutableState.value.copy(savedPc = saved?.pc, loadingSavedPc = false)
+                    }
+                }
+            } catch (_: Exception) {
+                synchronized(lock) {
+                    if (!closed && pairingRevision == 0L) mutableState.value = mutableState.value.copy(
+                        loadingSavedPc = false, status = "Saved pairing unavailable. Pair your PC again.")
+                }
+            }
+        }
+    }
 
     fun connect(address: String, pin: String, confirmedFingerprint: String? = null) {
         val endpoint: WifiEndpoint
@@ -56,13 +83,49 @@ class WifiController : AutoCloseable {
             }
             return
         }
-        val connection = Connection(endpoint, normalizedPin, fingerprint)
-        val old = synchronized(lock) {
+        startConnection(Connection(endpoint, normalizedPin, fingerprint))
+    }
+
+    fun reconnectSaved(address: String = "") {
+        val saved = synchronized(lock) { savedCredential } ?: return
+        val endpoint = try { WifiEndpoint.parse(address.ifBlank { saved.pc.address }) }
+            catch (error: IllegalArgumentException) {
+                synchronized(lock) { if (!closed) mutableState.value = mutableState.value.copy(status = error.message.orEmpty()) }
+                return
+            }
+        startConnection(Connection(endpoint, "", saved.pc.fingerprint, saved))
+    }
+
+    fun forgetPc() {
+        disconnect()
+        synchronized(lock) {
             if (closed) return
+            pairingRevision++
+            mutableState.value = mutableState.value.copy(loadingSavedPc = true)
+        }
+        scope.launch {
+            synchronized(lock) {
+                if (closed) return@launch
+                try {
+                    pairings.clear()
+                    savedCredential = null
+                    mutableState.value = freshState("Saved PC forgotten. Pair again to reconnect.")
+                        .copy(savedPc = null, loadingSavedPc = false)
+                } catch (_: Exception) {
+                    mutableState.value = mutableState.value.copy(loadingSavedPc = false, status = "Could not forget this PC. Try again.")
+                }
+            }
+        }
+    }
+
+    private fun startConnection(connection: Connection, expected: Connection? = null) {
+        val old = synchronized(lock) {
+            if (closed || (expected != null && current !== expected)) return
             val previous = current
             previous?.active?.set(false)
             current = connection
-            mutableState.value = freshState("Connecting to ${endpoint.host}…").copy(isConnecting = true)
+            mutableState.value = freshState(if (connection.credential != null) "Reconnecting to your saved PC…"
+                else "Connecting to ${connection.endpoint.host}…").copy(isConnecting = true)
             previous
         }
         old?.let { shutdown(it, release = true) }
@@ -100,6 +163,24 @@ class WifiController : AutoCloseable {
             return
         }
         enqueue(connection, frame)
+    }
+
+    fun requestApps() {
+        val connection = synchronized(lock) {
+            if (!mutableState.value.isConnected || !mutableState.value.dockSupported || mutableState.value.appsLoading) return
+            mutableState.value = mutableState.value.copy(appsLoading = true, appMessage = "Finding PC apps…")
+            current ?: return
+        }
+        enqueue(connection, "{\"type\":\"apps\"}")
+    }
+
+    fun launchApp(pcId: String, id: String) {
+        val connection = synchronized(lock) {
+            val state = mutableState.value
+            if (!state.isConnected || !state.dockSupported || state.pcId != pcId) return
+            current ?: return
+        }
+        enqueue(connection, JSONObject().put("type", "launchApp").put("pcId", pcId).put("id", id).toString())
     }
 
     fun disconnect() {
@@ -141,31 +222,10 @@ class WifiController : AutoCloseable {
             val hosts = linkedMapOf<String, WifiHost>()
             var errorMessage: String? = null
             try {
-                DatagramSocket().use { socket ->
-                    socket.broadcast = true
-                    socket.soTimeout = 250
-                    val targets = linkedSetOf(InetAddress.getByName("255.255.255.255"))
-                    NetworkInterface.getNetworkInterfaces()?.toList()?.filter { it.isUp && !it.isLoopback }
-                        ?.flatMap { it.interfaceAddresses }?.mapNotNullTo(targets) { it.broadcast }
-                    val request = "VIRKEY_DISCOVER_V1".toByteArray(Charsets.US_ASCII)
-                    targets.forEach { target ->
-                        runCatching { socket.send(DatagramPacket(request, request.size, target, WIFI_PORT)) }
-                    }
-                    val until = System.nanoTime() + 2_000_000_000L
-                    while (isActive && System.nanoTime() < until && isDiscoveryCurrent(epoch)) {
-                        val packet = DatagramPacket(ByteArray(2048), 2048)
-                        try { socket.receive(packet) } catch (_: SocketTimeoutException) { continue }
-                        val host = parseDiscoveryResponse(
-                            String(packet.data, packet.offset, packet.length, Charsets.UTF_8),
-                            packet.address.hostAddress.orEmpty(),
-                        ) ?: continue
-                        if (hosts.size >= 64 && host.address !in hosts) continue
-                        hosts[host.address] = host
-                        synchronized(lock) {
-                            if (!closed && discoveryEpoch == epoch) {
-                                mutableState.value = mutableState.value.copy(hosts = hosts.values.toList())
-                            }
-                        }
+                scan({ isActive && isDiscoveryCurrent(epoch) }) { host ->
+                    hosts[host.address] = host
+                    synchronized(lock) {
+                        if (!closed && discoveryEpoch == epoch) mutableState.value = mutableState.value.copy(hosts = hosts.values.toList())
                     }
                 }
             } catch (_: Exception) {
@@ -219,7 +279,8 @@ class WifiController : AutoCloseable {
             }
             socket.soTimeout = 1000
             connection.writer = BufferedWriter(OutputStreamWriter(socket.outputStream, Charsets.UTF_8))
-            writeFrame(connection, authenticationFrame(connection.pin, trust))
+            writeFrame(connection, connection.credential?.let { rememberedAuthenticationFrame(it, trust) }
+                ?: authenticationFrame(connection.pin, trust))
             connection.lastReceivedNanos = System.nanoTime()
             val reader = BufferedReader(InputStreamReader(socket.inputStream, Charsets.UTF_8))
             val parser = NowPlayingParser()
@@ -261,17 +322,32 @@ class WifiController : AutoCloseable {
                             throw IOException("Virkey Host did not complete pairing")
                         }
                         when (json.text("type")) {
-                            "error" -> throw IOException(json.text("message").ifBlank { "Virkey Host rejected the connection" })
+                            "error" -> throw AuthenticationRejected(json.text("code"), json.text("message").ifBlank { "Virkey Host rejected the connection" })
                             "ready" -> {
                                 if (connection.authenticated) throw IOException("Virkey Host sent a duplicate pairing response")
-                                connection.authenticated = true
+                                val pc = SavedWifiPc("${connection.endpoint.host}:${connection.endpoint.port}",
+                                    json.text("name").take(128).ifBlank { connection.endpoint.host }, requireNotNull(connection.fingerprint))
+                                val credential = connection.credential?.copy(pc = pc) ?: if (json.flag("rememberSupported"))
+                                    WifiCredential(pc, normalizedHex(json.text("deviceId"), 32), normalizedHex(json.text("token"), 64)) else null
                                 update(connection) {
+                                    var status = "Connected over Wi-Fi"
+                                    if (credential != null) {
+                                        try {
+                                            pairings.save(credential)
+                                            savedCredential = credential
+                                            pairingRevision++
+                                        } catch (_: Exception) { status = "Connected, but could not save this PC for next time." }
+                                    } else status = "Connected. Update Virkey Host to remember Wi-Fi pairing."
+                                    connection.authenticated = true
                                     it.copy(isConnected = true, isConnecting = false,
-                                        hostName = json.text("name").ifBlank { connection.endpoint.host },
-                                        status = "Connected over Wi-Fi", pendingFingerprint = null,
+                                        hostName = pc.name,
+                                        status = status, pendingFingerprint = null, savedPc = savedCredential?.pc, loadingSavedPc = false,
+                                        rememberedConnection = credential != null && savedCredential == credential,
                                         capsLock = json.flag("capsLock"), numLock = json.flag("numLock"),
-                                        ledsKnown = json.flag("ledsKnown"))
+                                        ledsKnown = json.flag("ledsKnown"), dockSupported = json.flag("dock"),
+                                        pcId = json.text("pcId").take(80))
                                 }
+                                if (json.flag("dock")) requestApps()
                             }
                             "pong" -> Unit
                             else -> {
@@ -285,6 +361,25 @@ class WifiController : AutoCloseable {
                                         val playing = parser.parse(json)
                                         update(connection) { it.copy(nowPlaying = playing) }
                                     }
+                                    "appsBegin" -> update(connection) {
+                                        if (json.text("pcId") == it.pcId) it.copy(apps = emptyList(), appsLoading = true, appMessage = "Finding PC apps…") else it
+                                    }
+                                    "app" -> {
+                                        val id = json.text("id").take(80)
+                                        val name = json.text("name").take(120)
+                                        val app = PcApp(id, name, decodeDockIcon(json.text("icon")))
+                                        update(connection) {
+                                            if (json.text("pcId") == it.pcId && id.isNotBlank() && name.isNotBlank() && it.appsLoading &&
+                                                it.apps.size < 256 && it.apps.none { entry -> entry.id == id }) it.copy(apps = it.apps + app) else it
+                                        }
+                                    }
+                                    "appsEnd" -> update(connection) {
+                                        if (json.text("pcId") == it.pcId) it.copy(appsLoading = false, appMessage = "${it.apps.size} apps available") else it
+                                    }
+                                    "appError" -> update(connection) {
+                                        it.copy(appsLoading = false, appMessage = json.text("message").take(200), status = json.text("message").take(200))
+                                    }
+                                    "appLaunched" -> update(connection) { it.copy(status = "App opened on your PC") }
                                     "commandError" -> update(connection) {
                                         it.copy(status = json.text("message").ifBlank { "Player declined that command" })
                                     }
@@ -299,11 +394,26 @@ class WifiController : AutoCloseable {
                 }
             }
         } catch (error: Exception) {
+            // DHCP may move the PC. Discovery is only a hint: retry once, with the original pin.
+            if (connection.credential != null && !connection.authenticated && !connection.rediscovered &&
+                error !is AuthenticationRejected && connection.active.get()) {
+                update(connection) { it.copy(status = "Finding your remembered PC on this network…") }
+                connection.closeSocket()
+                val hosts = runCatching { scan({ connection.active.get() }) {} }.getOrDefault(emptyList())
+                val relocated = hosts.firstOrNull { it.fingerprint == connection.fingerprint }
+                    ?.let { WifiEndpoint.parse(it.address) }
+                if (relocated != null && relocated != connection.endpoint && connection.active.get()) {
+                    startConnection(Connection(relocated, "", connection.fingerprint, connection.credential, rediscovered = true), expected = connection)
+                    return
+                }
+            }
             synchronized(lock) {
                 if (current === connection && !closed) {
                     current = null
                     connection.active.set(false)
-                    mutableState.value = freshState(connection.failure ?: connectionError(error))
+                    val message = connection.failure ?: connectionError(error)
+                    mutableState.value = freshState(message).copy(pairingRequired =
+                        (error is AuthenticationRejected && error.code == "pairingRequired") || "certificate changed" in message)
                 }
             }
         } finally {
@@ -370,9 +480,11 @@ class WifiController : AutoCloseable {
 
     private fun freshState(status: String) = WifiState(
         status = status, hosts = mutableState.value.hosts, isDiscovering = mutableState.value.isDiscovering,
+        savedPc = savedCredential?.pc, loadingSavedPc = mutableState.value.loadingSavedPc,
     )
 
-    private class Connection(val endpoint: WifiEndpoint, val pin: String, val fingerprint: String?) {
+    private class Connection(val endpoint: WifiEndpoint, val pin: String, val fingerprint: String?,
+        val credential: WifiCredential? = null, val rediscovered: Boolean = false) {
         val active = AtomicBoolean(true)
         val commands = Channel<String>(256)
         val queueLock = Any()
@@ -387,6 +499,33 @@ class WifiController : AutoCloseable {
     }
 }
 
+private class AuthenticationRejected(val code: String, message: String) : IOException(message)
+
+/** Bounded LAN hints. Never use a broadcast fingerprint in place of pinned TLS authentication. */
+internal fun scanWifiHosts(alive: () -> Boolean, found: (WifiHost) -> Unit): List<WifiHost> {
+    val hosts = linkedMapOf<String, WifiHost>()
+    DatagramSocket().use { socket ->
+        socket.broadcast = true
+        socket.soTimeout = 250
+        val targets = linkedSetOf(InetAddress.getByName("255.255.255.255"))
+        NetworkInterface.getNetworkInterfaces()?.toList()?.filter { it.isUp && !it.isLoopback }
+            ?.flatMap { it.interfaceAddresses }?.mapNotNullTo(targets) { it.broadcast }
+        val request = "VIRKEY_DISCOVER_V1".toByteArray(Charsets.US_ASCII)
+        targets.forEach { target -> runCatching { socket.send(DatagramPacket(request, request.size, target, WIFI_PORT)) } }
+        val until = System.nanoTime() + 2_000_000_000L
+        while (alive() && System.nanoTime() < until) {
+            val packet = DatagramPacket(ByteArray(2048), 2048)
+            try { socket.receive(packet) } catch (_: SocketTimeoutException) { continue }
+            val host = parseDiscoveryResponse(String(packet.data, packet.offset, packet.length, Charsets.UTF_8),
+                packet.address.hostAddress.orEmpty()) ?: continue
+            if (hosts.size >= 64 && host.address !in hosts) continue
+            hosts[host.address] = host
+            found(host)
+        }
+    }
+    return hosts.values.toList()
+}
+
 internal fun parseDiscoveryResponse(response: String, source: String): WifiHost? = runCatching {
     val json = JSONObject(response)
     if (json.opt("protocol") != 1) return null
@@ -395,7 +534,8 @@ internal fun parseDiscoveryResponse(response: String, source: String): WifiHost?
     val endpoint = WifiEndpoint.parse("$source:$port")
     if (!endpoint.host.all { it in '0'..'9' || it == '.' }) return null
     val name = json.text("name").take(128).ifBlank { endpoint.host }
-    WifiHost("${endpoint.host}:${endpoint.port}", name)
+    val fingerprint = json.text("fingerprint").takeIf { it.isNotBlank() }?.let { normalizeFingerprint(it) }
+    WifiHost("${endpoint.host}:${endpoint.port}", name, fingerprint)
 }.getOrNull()
 
 internal fun connectionError(error: Exception): String {

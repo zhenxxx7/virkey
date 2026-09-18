@@ -1,10 +1,33 @@
 # Virkey
 
-An Android tablet keyboard and trackpad for a Windows PC. Bluetooth is the default and presents a standard HID keyboard and mouse without a PC receiver. Optional Wi-Fi mode uses the portable Virkey Host for Windows, adding live media details and playback controls.
+<img src="docs/previews/virkey-logo.png" width="88" height="88" alt="Virkey logo">
+
+An Android tablet keyboard and trackpad for a Windows PC. Bluetooth is the first-run default and presents a standard HID keyboard and mouse without a PC receiver. Optional Wi-Fi mode uses the portable Virkey Host for Windows, adding live media details and playback controls. Virkey remembers your last transport and trusted Wi-Fi PC.
 
 This test build targets landscape Android tablets and Windows 11. Compiling and automated tests do not establish compatibility with a particular tablet's Bluetooth firmware: the real tablet-to-PC checks below are required.
 
+## Download 0.6.0
+
+- [Android APK](https://github.com/zhenxxx7/virkey/releases/download/v0.6.0/virkey-0.6.0.apk)
+- [Windows host EXE](https://github.com/zhenxxx7/virkey/releases/download/v0.6.0/virkey-host-0.6.0.exe) — needed only for Wi-Fi
+- [Checksums and release notes](https://github.com/zhenxxx7/virkey/releases/tag/v0.6.0)
+
+This release adds a customizable app/soundboard dock, larger glass-style media
+artwork, optional online lyrics, PIN-free Wi-Fi reconnect after the first pairing,
+and the Virkey logo on the Windows EXE, window and tray.
+
+**Upgrading:** install the APK over the previous build, exit the old Windows host
+from its tray menu, then run the new EXE. Pair once with the new host; later use
+**Reconnect** without a PIN. The APK remains development-signed and the EXE is
+unsigned. See [release notes](docs/releases/0.6.0.md),
+[installation and device checks](docs/testing-0.6.0.md), and
+[automated validation](docs/validation-0.6.0.md).
+
 ## Previews
+
+### Custom app and soundboard dock
+
+![Virkey customizable app and soundboard dock](docs/previews/virkey-app-dock.png)
 
 ### Keyboard and trackpad
 
@@ -22,9 +45,19 @@ This test build targets landscape Android tablets and Windows 11. Compiling and 
 
 ![Virkey live media panel](docs/previews/virkey-live-media.png)
 
+### Glass player and lyrics
+
+![Virkey glass player with timed lyrics](docs/previews/virkey-lyrics.png)
+
+Preview artwork, track names, and lyric lines are synthetic fixtures, not a live service capture.
+
 ### Windows host
 
 ![Virkey Host for Windows](docs/previews/virkey-host-preview.png)
+
+### Remembered Wi-Fi connection
+
+![Reconnect to a saved PC without entering a PIN](docs/previews/virkey-wifi-reconnect.png)
 
 ## First connection
 
@@ -52,8 +85,12 @@ If the PC was paired with the tablet before Virkey was installed and only sees p
 | Number pad | Physical keypad keys; Num Lock indicator follows Windows feedback |
 | Media controls | Mute, volume down/up, previous, play/pause, next, and stop |
 | Bluetooth / Wi-Fi | Switch input transport; release and disconnect the previous session |
+| Wi-Fi Reconnect | Reuse the saved PC identity and reconnect token; no PIN on ordinary subsequent connections |
 | Wi-Fi now playing | Artwork, title, artist, album, playback timing, and supported player controls |
 | Wi-Fi seek bar | Seek within the current track when the player supports it |
+| Lyrics | Expand the player; optionally enable online lyrics, with timed highlighting when available |
+| Timed lyric line | Tap to seek when the current player supports seeking |
+| Expand / Number pad | Give the media player the full upper deck, or restore the number pad |
 | One finger on trackpad | Move the mouse pointer |
 | One-finger tap | Left-click |
 | Two-finger tap | Right-click |
@@ -73,8 +110,9 @@ To select text, first position the PC pointer at the selection start. Hold one f
 - Keep Virkey visible while using the keyboard. The screen stays awake while the app is visible.
 - A connected-device foreground service and notification maintain registration through pairing dialogs. Switching away releases all locally held inputs. Removing Virkey from Recents stops the session.
 - Disconnects clear local key state. A fresh connection sends empty input reports before accepting new input. A failed send ends the connection rather than replaying input later.
-- Only one PC is active at a time. Reconnecting is explicit; Virkey remembers the last selected PC but does not connect or type automatically after launch.
-- Wi-Fi requires Android's Internet permission for local network sockets. There are no cloud services, accounts, analytics, or keystroke logs. Pairing uses a manually verified certificate fingerprint and a host PIN over TLS.
+- Only one PC is active at a time. Reconnecting is explicit; Virkey remembers the last selected transport and PC but does not connect or type automatically after launch. The first launch still defaults to Bluetooth.
+- Wi-Fi requires Android's Internet permission for local network sockets. Keyboard/mouse input and artwork stay on the local network. First pairing uses a manually verified certificate fingerprint and host PIN over TLS; subsequent connections use the saved certificate and a protected reconnect token, never a stored PIN. There are no accounts, analytics, or keystroke logs.
+- Online lyrics are optional and off until enabled in the Lyrics pane. While that pane is visible and enabled, track title, artist, album and duration are sent over HTTPS to LRCLIB; the provider also sees the device's public IP. No keys, pairing PINs, PC identifiers or artwork are sent. **Online off** disables lookup; hiding the pane or leaving the media deck stops requests. Results are cached only in memory.
 - Wi-Fi disconnects when the app leaves the foreground. The host releases held input on disconnect, shutdown, suspend, or a four-second heartbeat timeout. Reconnect explicitly when returning to the app.
 
 Android 9 / API 28 is the minimum. Bluetooth mode requires the OS to expose the Bluetooth HID Device profile. The Wi-Fi host targets Windows 11 x64. Other desktop operating systems, pre-login screens, BIOS, and behavior under device battery management have not been certified. USB transport, remote screen viewing, clipboard sync, and macros are not implemented.
@@ -87,12 +125,42 @@ address, then enter its PIN. Compare the fingerprint shown on both devices
 before confirming **Trust & pair**. Both devices must be on the same reachable
 local network. Windows Firewall may need to allow the host on a private network.
 
-The media deck displays the current Windows media session. Artwork and timing
-come from the player; seek, shuffle, repeat, and transport controls enable only
-when supported. Bluetooth continues to offer media buttons without track data.
+With app and host **0.6.0 or newer**, pair once; later, open **Connect to PC →
+Reconnect** with no PIN or repeated fingerprint prompt. The host keeps its
+identity across restarts. If the saved address stops working, Virkey makes one
+LAN discovery attempt to find the same pinned PC; manual address editing also
+works. A different certificate is never silently accepted. **Forget PC** removes
+the tablet's saved pairing. **Reset pairing** on the host revokes all remembered
+tablets and generates a new PIN. See [reconnect setup and recovery](docs/reconnect-0.6.0.md).
 
-See [the local testing guide](docs/testing-0.3.0.md) for device checks. Download
+The media deck displays the current Windows media session with larger artwork,
+artwork-colored glass layers and soft highlights. Artwork and timing come from
+the player; seek, shuffle, repeat, and transport controls enable only when
+supported. **Expand** gives the player more room without hiding the trackpad.
+Bluetooth continues to offer media buttons without track data.
+
+For lyrics, tap **Lyrics → Enable online lyrics**. Timed lyrics highlight and
+scroll with the PC timeline; tap a line to seek. Plain lyrics are shown when
+timing is unavailable. Tracks must match LRCLIB's catalog; not every song,
+recording, podcast or video has lyrics. Internet is needed only for lookup,
+not keyboard input or local playback controls. This is not a Spotify login or
+access to Spotify's private lyrics service. See [the media testing guide](docs/media-0.5.0.md).
+
+See [the testing guide](docs/testing-0.6.0.md) for device checks. Download
 the current APK and Windows host from [GitHub Releases](https://github.com/zhenxxx7/virkey/releases/latest).
+
+## App dock and soundboard
+
+The customizable dock supports app and soundboard buttons. Use **Edit dock** to add,
+rename, reorder or remove up to 24 buttons. PC apps get their Windows icon
+automatically; **Choose image** sets your own, and **Auto icon** restores it.
+App launch requires Wi-Fi with Virkey Host 0.4.0 or newer; Start-menu shortcuts appear
+automatically, and **Extra apps** in the host adds portable apps or shortcuts.
+
+**Sound / hotkey** buttons work over Bluetooth or Wi-Fi. Assign the same shortcut
+to a sound or voice inside Voicemod (or another soundboard), then create its dock
+button. This controls the existing PC soundboard through keybinds; sounds and
+voice processing stay in that application. See the [dock setup guide](docs/dock-0.4.0.md).
 
 ## Build
 
@@ -105,6 +173,9 @@ Use JDK 17, Android SDK platform 36 / build tools 35.0.0, and the included Gradl
 # Build APK, run JVM tests, and run Android lint.
 .\scripts\build.ps1
 
+# Only after changing the Android vector logo: regenerate the Windows icon.
+powershell.exe -NoProfile -STA -File .\scripts\render-host-icon.ps1
+
 # Build the optional portable Windows Wi-Fi host and run its self-tests.
 .\scripts\build-host.ps1
 ```
@@ -114,6 +185,9 @@ use a clean versioned APK filename. A production release requires a separate
 private signing key and release process. Never commit signing keys.
 
 For build dependencies, checksums, and SDK setup details, see [docs/toolchain.md](docs/toolchain.md).
+Release packaging is documented in [docs/publishing.md](docs/publishing.md).
+Binaries are release assets, not tracked source. The separate local `website/`
+directory is ignored and is not part of this repository's source or release.
 
 ## Device acceptance checklist
 
@@ -127,12 +201,16 @@ Run these on your Android tablet and Windows 11 before treating the build as rel
 6. Sleep and wake Windows, reconnect manually, and verify Caps Lock feedback and input. Record any repair/re-pair requirement.
 7. Try tablet multi-window and both landscape directions. Android 16 may ignore orientation requests on large displays; use landscape full-screen for the laptop arrangement.
 8. Open **Numpad & media**, turn Num Lock on, and test every keypad key in Notepad. Verify the Num Lock indicator, volume/mute, and media transport in a compatible player. Switch decks while holding a key and verify it releases.
+9. Pair over Wi-Fi once; restart the app and host, then reconnect without a PIN. Check **Forget PC** and Windows **Reset pairing**. Repeat after rebooting both devices.
+10. Add an app and soundboard hotkey to the dock; verify automatic/custom icons and saved order. Expand the media player and test opt-in lyrics, seeking, disabling lyrics and offline behavior.
 
 ## Code map
 
 - `input/`: pure Kotlin HID reports, physical key mapping, rollover handling.
 - `bluetooth/`: Android HID profile, pairing/connection state, foreground session.
 - `network/`: pinned TLS Wi-Fi session, discovery, input serialization, media state.
+- `dock/`: persistent custom buttons, images and ordered soundboard hotkeys.
+- `media/`: opt-in HTTPS lyric lookup, bounded in-memory cache and LRC parsing.
 - `windows/Virkey.Host/`: portable Windows input receiver, pairing, and media bridge.
 - `ui/`: Compose laptop surface, connection dialog, pointer gestures.
 - `MainActivity`: Android permission and system pairing flows, lifecycle release handling.
@@ -145,3 +223,6 @@ Run these on your Android tablet and Windows 11 before treating the build as rel
 - [Android connected-device foreground service](https://developer.android.com/develop/background-work/services/fgs/service-types#connected-device)
 - [Windows built-in HID transports](https://learn.microsoft.com/en-us/windows-hardware/drivers/hid/hid-transports)
 - [Bluetooth HID profile and boot protocol](https://www.bluetooth.com/wp-content/uploads/2023/08/HID-Lite-WP-V10.pdf)
+- [LRCLIB API](https://lrclib.net/docs)
+- [Android Keystore](https://developer.android.com/privacy-and-security/keystore)
+- [Windows data protection](https://learn.microsoft.com/en-us/dotnet/api/system.security.cryptography.protecteddata)

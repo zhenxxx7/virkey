@@ -1,5 +1,8 @@
 # Virkey 0.3.0 test guide
 
+Historical guide for 0.3.0. For current installation, persistent pairing and
+device checks, use [the 0.6.0 guide](testing-0.6.0.md).
+
 This version keeps Bluetooth as the default and adds optional local Wi-Fi input
 and a live media panel. USB transport is not included.
 

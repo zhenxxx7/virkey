@@ -11,3 +11,4 @@ captures/
 .DS_Store
 **/bin/
 **/obj/
+/website/

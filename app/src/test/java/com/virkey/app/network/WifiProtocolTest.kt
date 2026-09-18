@@ -66,7 +66,8 @@ class WifiProtocolTest {
         assertEquals("auth", auth.getString("type"))
         assertEquals(1, auth.getInt("protocol"))
         assertEquals("012345", auth.getString("pin"))
-        assertEquals(4, auth.length())
+        assertEquals(5, auth.length())
+        assertTrue(auth.getBoolean("remember"))
     }
 
     @Test fun certificateMismatchAndMissingCertificateNeverAuthorizePin() {
@@ -80,6 +81,28 @@ class WifiProtocolTest {
         assertThrows(CertificateException::class.java) {
             trust.checkClientTrusted(arrayOf(TestTlsIdentity.certificate), "RSA")
         }
+    }
+
+    @Test fun rememberedAuthRequiresTheSavedCertificateAndNeverContainsPin() {
+        val credential = WifiCredential(SavedWifiPc("192.168.1.2:49372", "PC", TestTlsIdentity.fingerprint), "ab".repeat(16), "cd".repeat(32))
+        val inspection = PairingTrustManager(null)
+        inspection.checkServerTrusted(arrayOf(TestTlsIdentity.certificate), "RSA")
+        assertThrows(IllegalStateException::class.java) { rememberedAuthenticationFrame(credential, inspection) }
+        val trust = PairingTrustManager(TestTlsIdentity.fingerprint)
+        trust.checkServerTrusted(arrayOf(TestTlsIdentity.certificate), "RSA")
+        val frame = JSONObject(rememberedAuthenticationFrame(credential, trust))
+        assertFalse(frame.has("pin"))
+        assertEquals(credential.deviceId, frame.getString("deviceId"))
+        assertEquals(credential.token, frame.getString("token"))
+        assertThrows(IllegalStateException::class.java) {
+            rememberedAuthenticationFrame(credential.copy(pc = credential.pc.copy(fingerprint = "00".repeat(32))), trust)
+        }
+    }
+
+    @Test fun discoveryCarriesOnlyAValidatedFingerprintHint() {
+        val reply = """{"protocol":1,"name":"Saved PC","port":49372,"fingerprint":"${"AB".repeat(32)}"}"""
+        assertEquals("ab".repeat(32), parseDiscoveryResponse(reply, "192.168.1.2")?.fingerprint)
+        assertNull(parseDiscoveryResponse(reply.replace("AB".repeat(32), "short"), "192.168.1.2"))
     }
 
     @Test fun failedRevalidationClearsPreviousTrust() {
