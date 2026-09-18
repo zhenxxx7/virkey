@@ -79,6 +79,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.virkey.app.input.KeySpec
 import com.virkey.app.input.LaptopLayout
+import com.virkey.app.network.WifiState
 
 private val Background = Color(0xFF101315)
 private val Deck = Color(0xFF1B2023)
@@ -90,6 +91,22 @@ private val Outline = Color(0xFF3B4447)
 
 @Composable
 fun VirkeyScreen(state: RemoteUiState, onAction: (RemoteAction) -> Unit) {
+    VirkeyScreen(state, connectionMode = ConnectionMode.BLUETOOTH, onAction = onAction)
+}
+
+@Composable
+fun VirkeyScreen(
+    state: RemoteUiState,
+    connectionMode: ConnectionMode,
+    wifiState: WifiState = WifiState(),
+    onModeChange: (ConnectionMode) -> Unit = {},
+    onWifiConnect: (String, String) -> Unit = { _, _ -> },
+    onWifiTrust: () -> Unit = {},
+    onWifiDisconnect: () -> Unit = {},
+    onWifiDiscover: () -> Unit = {},
+    onMedia: (String, Long, Boolean, String) -> Unit = { _, _, _, _ -> },
+    onAction: (RemoteAction) -> Unit,
+) {
     var showConnections by rememberSaveable { mutableStateOf(false) }
     var showExtras by rememberSaveable { mutableStateOf(false) }
     var inputEpoch by remember { mutableIntStateOf(0) }
@@ -149,6 +166,12 @@ fun VirkeyScreen(state: RemoteUiState, onAction: (RemoteAction) -> Unit) {
                 Header(
                     state = state,
                     onAction = dispatch,
+                    connectionMode = connectionMode,
+                    changeMode = {
+                        dispatch(RemoteAction.ReleaseAll)
+                        onModeChange(if (connectionMode == ConnectionMode.BLUETOOTH) ConnectionMode.WIFI else ConnectionMode.BLUETOOTH)
+                        showConnections = false
+                    },
                     showExtras = showExtras,
                     togglePanel = {
                         dispatch(RemoteAction.ReleaseAll)
@@ -156,13 +179,20 @@ fun VirkeyScreen(state: RemoteUiState, onAction: (RemoteAction) -> Unit) {
                     },
                     openConnections = {
                         dispatch(RemoteAction.ReleaseAll)
-                        dispatch(RemoteAction.RefreshDevices)
+                        if (connectionMode == ConnectionMode.BLUETOOTH) dispatch(RemoteAction.RefreshDevices)
                         showConnections = true
                     },
                 )
-                key(inputEpoch, inputEnabled) {
+                key(inputEpoch, inputEnabled, connectionMode) {
                     if (showExtras) {
-                        NumpadMediaPanel(state.copy(isConnected = inputEnabled), dispatch, Modifier.fillMaxWidth().weight(1.5f))
+                        NumpadMediaPanel(
+                            state.copy(isConnected = inputEnabled), dispatch, Modifier.fillMaxWidth().weight(1.5f),
+                            nowPlaying = wifiState.nowPlaying,
+                            isWifi = connectionMode == ConnectionMode.WIFI,
+                            onMedia = { command, position, enabled, mode ->
+                                if (inputEnabled && connectionMode == ConnectionMode.WIFI) onMedia(command, position, enabled, mode)
+                            },
+                        )
                     } else {
                         KeyboardDeck(state, inputEnabled, compact, dispatch, Modifier.fillMaxWidth().weight(1.5f))
                     }
@@ -171,7 +201,7 @@ fun VirkeyScreen(state: RemoteUiState, onAction: (RemoteAction) -> Unit) {
                     Modifier.fillMaxWidth().weight(1f),
                     contentAlignment = Alignment.Center,
                 ) {
-                    key(inputEpoch, inputEnabled) {
+                    key(inputEpoch, inputEnabled, connectionMode) {
                         Trackpad(
                             enabled = inputEnabled,
                             onAction = dispatch,
@@ -190,7 +220,20 @@ fun VirkeyScreen(state: RemoteUiState, onAction: (RemoteAction) -> Unit) {
                 }
             }
         }
-        if (showConnections) ConnectionDialog(state, dispatch) { showConnections = false }
+        if (showConnections) {
+            if (connectionMode == ConnectionMode.WIFI) {
+                WifiConnectionDialog(
+                    state = wifiState,
+                    onConnect = onWifiConnect,
+                    onTrust = onWifiTrust,
+                    onDisconnect = onWifiDisconnect,
+                    onDismiss = { showConnections = false },
+                    onDiscover = onWifiDiscover,
+                )
+            } else {
+                ConnectionDialog(state, dispatch) { showConnections = false }
+            }
+        }
     }
 }
 
@@ -225,7 +268,7 @@ private fun KeyboardDeck(
                             LaptopKey(
                                 key = key,
                                 enabled = enabled,
-                                capsLock = state.capsLock,
+                                capsLock = state.capsLock.takeIf { state.locksKnown },
                                 compact = compact,
                                 functionRow = rowIndex == 0,
                                 onAction = onAction,
@@ -243,6 +286,8 @@ private fun KeyboardDeck(
 private fun Header(
     state: RemoteUiState,
     onAction: (RemoteAction) -> Unit,
+    connectionMode: ConnectionMode,
+    changeMode: () -> Unit,
     showExtras: Boolean,
     togglePanel: () -> Unit,
     openConnections: () -> Unit,
@@ -267,6 +312,10 @@ private fun Header(
             Text("KEYBOARD + TRACKPAD", color = Muted, fontSize = 9.sp, letterSpacing = 1.8.sp)
         }
         Spacer(Modifier.weight(1f))
+        TextButton(onClick = changeMode, modifier = Modifier.testTag("transport_toggle")) {
+            Text(if (connectionMode == ConnectionMode.BLUETOOTH) "Bluetooth" else "Wi-Fi", fontSize = 12.sp)
+        }
+        Spacer(Modifier.width(8.dp))
         OutlinedButton(
             onClick = togglePanel,
             modifier = Modifier.testTag("panel_toggle"),
@@ -301,7 +350,7 @@ private fun Header(
 private fun LaptopKey(
     key: KeySpec,
     enabled: Boolean,
-    capsLock: Boolean,
+    capsLock: Boolean?,
     compact: Boolean,
     functionRow: Boolean,
     onAction: (RemoteAction) -> Unit,
@@ -374,7 +423,7 @@ private fun LaptopKey(
                 modifier = if (key.label.length > 2) Modifier.align(Alignment.CenterStart) else Modifier,
             )
         }
-        if (key.usage == 0x39) Box(Modifier.align(Alignment.TopEnd).padding(2.dp).size(4.dp).background(if (capsLock) Accent else Outline, CircleShape))
+        if (key.usage == 0x39 && capsLock != null) Box(Modifier.align(Alignment.TopEnd).padding(2.dp).size(4.dp).background(if (capsLock) Accent else Outline, CircleShape))
         if (key.usage == 0x2C) Box(Modifier.align(Alignment.BottomCenter).padding(bottom = 4.dp).width(36.dp).height(2.dp).background(Outline, CircleShape))
         if (key.usage == 0x09 || key.usage == 0x0D) Box(Modifier.align(Alignment.BottomCenter).width(8.dp).height(2.dp).background(Muted.copy(alpha = 0.4f), CircleShape))
     }

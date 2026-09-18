@@ -1,16 +1,34 @@
 # Virkey
 
-An Android tablet keyboard and trackpad for a Windows PC. Virkey presents itself as a standard Bluetooth HID keyboard and mouse; Windows does not need a receiver app.
+An Android tablet keyboard and trackpad for a Windows PC. Bluetooth is the default and presents a standard HID keyboard and mouse without a PC receiver. Optional Wi-Fi mode uses the portable Virkey Host for Windows, adding live media details and playback controls.
 
 This test build targets landscape Android tablets and Windows 11. Compiling and automated tests do not establish compatibility with a particular tablet's Bluetooth firmware: the real tablet-to-PC checks below are required.
 
-## Preview
+## Previews
 
-![Virkey laptop keyboard and trackpad interface](https://github.com/zhenxxx7/virkey/releases/download/v0.2.0/virkey-tablet.png)
+### Keyboard and trackpad
+
+![Virkey laptop keyboard and trackpad interface](docs/previews/virkey-tablet.png)
+
+### Number pad and Bluetooth media controls
+
+![Virkey number pad and media controls](docs/previews/virkey-numpad-media.png)
+
+### Wi-Fi media session
+
+![Virkey Wi-Fi media session](docs/previews/virkey-wifi-media.png)
+
+### Live media panel
+
+![Virkey live media panel](docs/previews/virkey-live-media.png)
+
+### Windows host
+
+![Virkey Host for Windows](docs/previews/virkey-host-preview.png)
 
 ## First connection
 
-1. Install the debug APK on the tablet and open **Virkey**.
+1. Install the APK on the tablet and open **Virkey**.
 2. Tap **Connect to PC**, allow **Nearby devices**, and enable Bluetooth if prompted. Allow notifications to make the session's Disconnect action accessible outside the app.
 3. On Windows, open **Settings → Bluetooth & devices → Add device → Bluetooth**.
 4. In Virkey, tap **Pair new Windows PC** and approve Android's discoverability prompt. Select the tablet's existing Bluetooth name in Windows; it may appear as the device's system Bluetooth name rather than Virkey.
@@ -33,6 +51,9 @@ If the PC was paired with the tablet before Virkey was installed and only sees p
 | Numpad & media / Keyboard | Switch the upper deck; the trackpad stays available below |
 | Number pad | Physical keypad keys; Num Lock indicator follows Windows feedback |
 | Media controls | Mute, volume down/up, previous, play/pause, next, and stop |
+| Bluetooth / Wi-Fi | Switch input transport; release and disconnect the previous session |
+| Wi-Fi now playing | Artwork, title, artist, album, playback timing, and supported player controls |
+| Wi-Fi seek bar | Seek within the current track when the player supports it |
 | One finger on trackpad | Move the mouse pointer |
 | One-finger tap | Left-click |
 | Two-finger tap | Right-click |
@@ -53,9 +74,25 @@ To select text, first position the PC pointer at the selection start. Hold one f
 - A connected-device foreground service and notification maintain registration through pairing dialogs. Switching away releases all locally held inputs. Removing Virkey from Recents stops the session.
 - Disconnects clear local key state. A fresh connection sends empty input reports before accepting new input. A failed send ends the connection rather than replaying input later.
 - Only one PC is active at a time. Reconnecting is explicit; Virkey remembers the last selected PC but does not connect or type automatically after launch.
-- No Internet permission, cloud service, accounts, analytics, or keystroke logging are included. Only the last PC address is saved locally.
+- Wi-Fi requires Android's Internet permission for local network sockets. There are no cloud services, accounts, analytics, or keystroke logs. Pairing uses a manually verified certificate fingerprint and a host PIN over TLS.
+- Wi-Fi disconnects when the app leaves the foreground. The host releases held input on disconnect, shutdown, suspend, or a four-second heartbeat timeout. Reconnect explicitly when returning to the app.
 
-Android 9 / API 28 is the minimum. The tablet's OS must expose the Bluetooth HID Device profile. Other desktop operating systems, pre-login screens, BIOS, and behavior under device battery management have not been certified. Wi-Fi transport, remote screen viewing, clipboard sync, and macros are not implemented.
+Android 9 / API 28 is the minimum. Bluetooth mode requires the OS to expose the Bluetooth HID Device profile. The Wi-Fi host targets Windows 11 x64. Other desktop operating systems, pre-login screens, BIOS, and behavior under device battery management have not been certified. USB transport, remote screen viewing, clipboard sync, and macros are not implemented.
+
+## Wi-Fi and live media
+
+Run the portable Windows host, start hosting, and switch Virkey's header from
+**Bluetooth** to **Wi-Fi**. Open **Connect to PC**, find your PC or enter its
+address, then enter its PIN. Compare the fingerprint shown on both devices
+before confirming **Trust & pair**. Both devices must be on the same reachable
+local network. Windows Firewall may need to allow the host on a private network.
+
+The media deck displays the current Windows media session. Artwork and timing
+come from the player; seek, shuffle, repeat, and transport controls enable only
+when supported. Bluetooth continues to offer media buttons without track data.
+
+See [the local testing guide](docs/testing-0.3.0.md) for device checks. Download
+the current APK and Windows host from [GitHub Releases](https://github.com/zhenxxx7/virkey/releases/latest).
 
 ## Build
 
@@ -67,9 +104,14 @@ Use JDK 17, Android SDK platform 36 / build tools 35.0.0, and the included Gradl
 
 # Build APK, run JVM tests, and run Android lint.
 .\scripts\build.ps1
+
+# Build the optional portable Windows Wi-Fi host and run its self-tests.
+.\scripts\build-host.ps1
 ```
 
-The debug APK is generated at `app/build/outputs/apk/debug/app-debug.apk`. It is signed with a development key for testing; a production release requires a separate private signing key and release process. Never commit signing keys.
+The Android build is signed with a development key for testing. GitHub releases
+use a clean versioned APK filename. A production release requires a separate
+private signing key and release process. Never commit signing keys.
 
 For build dependencies, checksums, and SDK setup details, see [docs/toolchain.md](docs/toolchain.md).
 
@@ -90,6 +132,8 @@ Run these on your Android tablet and Windows 11 before treating the build as rel
 
 - `input/`: pure Kotlin HID reports, physical key mapping, rollover handling.
 - `bluetooth/`: Android HID profile, pairing/connection state, foreground session.
+- `network/`: pinned TLS Wi-Fi session, discovery, input serialization, media state.
+- `windows/Virkey.Host/`: portable Windows input receiver, pairing, and media bridge.
 - `ui/`: Compose laptop surface, connection dialog, pointer gestures.
 - `MainActivity`: Android permission and system pairing flows, lifecycle release handling.
 - `app/src/test/`: HID, layout, gesture, and UI checks.

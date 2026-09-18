@@ -4,6 +4,7 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
@@ -53,6 +54,7 @@ import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.virkey.app.input.MediaKeys
+import com.virkey.app.network.NowPlayingState
 import kotlin.math.roundToInt
 
 private val PanelDeck = Color(0xFF1B2023)
@@ -68,6 +70,9 @@ fun NumpadMediaPanel(
     state: RemoteUiState,
     onAction: (RemoteAction) -> Unit,
     modifier: Modifier = Modifier,
+    nowPlaying: NowPlayingState = NowPlayingState(),
+    onMedia: (String, Long, Boolean, String) -> Unit = { _, _, _, _ -> },
+    isWifi: Boolean = false,
 ) {
     Surface(
         modifier.testTag("numpad_media_panel"),
@@ -92,11 +97,11 @@ fun NumpadMediaPanel(
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         PanelHeading("NUMBER PAD", compact)
                         Spacer(Modifier.weight(1f))
-                        Box(Modifier.size(5.dp).background(if (state.numLock) PanelAccent else PanelOutline, CircleShape))
+                        if (state.locksKnown) Box(Modifier.size(5.dp).background(if (state.numLock) PanelAccent else PanelOutline, CircleShape))
                         Spacer(Modifier.width(6.dp))
                         Text(
-                            if (state.numLock) "NUM LOCK ON" else "NUM LOCK OFF",
-                            color = if (state.numLock) PanelAccent else PanelMuted,
+                            if (!state.locksKnown) "NUM LOCK" else if (state.numLock) "NUM LOCK ON" else "NUM LOCK OFF",
+                            color = if (state.locksKnown && state.numLock) PanelAccent else PanelMuted,
                             fontSize = if (compact) 8.sp else 9.sp,
                             letterSpacing = 0.8.sp,
                         )
@@ -111,7 +116,7 @@ fun NumpadMediaPanel(
                                     description = "Numpad ${key.description}",
                                     enabled = state.isConnected,
                                     compact = compact,
-                                    indicator = if (key.usage == 0x53) state.numLock else null,
+                                    indicator = if (key.usage == 0x53 && state.locksKnown) state.numLock else null,
                                     homingMark = key.usage == 0x5D,
                                     down = RemoteAction.KeyDown(key.usage),
                                     up = RemoteAction.KeyUp(key.usage),
@@ -144,7 +149,7 @@ fun NumpadMediaPanel(
                     }
                     if (!condensed) {
                         Text(
-                            if (state.numLock) "Numbers ready" else "Turn on Num Lock for numbers",
+                            if (!state.locksKnown) "Num Lock controls numbers" else if (state.numLock) "Numbers ready" else "Turn on Num Lock for numbers",
                             color = PanelMuted,
                             fontSize = if (compact) 9.sp else 11.sp,
                             maxLines = 1,
@@ -155,34 +160,99 @@ fun NumpadMediaPanel(
                 Box(Modifier.width(1.dp).fillMaxHeight().background(PanelOutline.copy(alpha = 0.6f)))
                 Column(
                     Modifier.weight(1.2f).fillMaxHeight().testTag("media_controls"),
-                    verticalArrangement = Arrangement.spacedBy(if (compact) 7.dp else 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(if (compact) 5.dp else 10.dp),
                 ) {
-                    PanelHeading("SOUND & PLAYBACK", compact)
-                    Row(
-                        Modifier.fillMaxWidth().weight(1f),
-                        horizontalArrangement = Arrangement.spacedBy(gap),
-                    ) {
-                        MediaPanelKey("MUTE", "Mute", null, MediaKeys.MUTE, state, compact, onAction, Modifier.weight(1f).fillMaxHeight())
-                        MediaPanelKey("−", "Volume down", "VOLUME", MediaKeys.VOLUME_DOWN, state, compact, onAction, Modifier.weight(1f).fillMaxHeight())
-                        MediaPanelKey("+", "Volume up", "VOLUME", MediaKeys.VOLUME_UP, state, compact, onAction, Modifier.weight(1f).fillMaxHeight())
+                    if (isWifi) {
+                        NowPlayingCard(nowPlaying, state.isConnected, compact,
+                            onSeek = { onMedia("seek", it, false, "off") },
+                            modifier = Modifier.fillMaxWidth().weight(1f))
+                    } else {
+                        PanelHeading("SOUND & PLAYBACK", compact)
                     }
                     Row(
-                        Modifier.fillMaxWidth().weight(1f),
+                        Modifier.fillMaxWidth().then(if (isWifi) Modifier.height(if (compact) 32.dp else 42.dp) else Modifier.weight(1f)),
                         horizontalArrangement = Arrangement.spacedBy(gap),
                     ) {
-                        MediaPanelKey("|◀", "Previous", "PREVIOUS", MediaKeys.PREVIOUS, state, compact, onAction, Modifier.weight(1f).fillMaxHeight())
-                        MediaPanelKey("▶ / Ⅱ", "Play / Pause", "PLAY / PAUSE", MediaKeys.PLAY_PAUSE, state, compact, onAction, Modifier.weight(1.4f).fillMaxHeight(), accent = true)
-                        MediaPanelKey("▶|", "Next", "NEXT", MediaKeys.NEXT, state, compact, onAction, Modifier.weight(1f).fillMaxHeight())
-                        MediaPanelKey("■", "Stop", "STOP", MediaKeys.STOP, state, compact, onAction, Modifier.weight(1f).fillMaxHeight())
+                        MediaPanelKey("MUTE", "Mute", null, MediaKeys.MUTE, state, compact || isWifi, onAction, Modifier.weight(1f).fillMaxHeight())
+                        MediaPanelKey("−", "Volume down", "VOLUME".takeUnless { isWifi }, MediaKeys.VOLUME_DOWN, state, compact || isWifi, onAction, Modifier.weight(1f).fillMaxHeight())
+                        MediaPanelKey("+", "Volume up", "VOLUME".takeUnless { isWifi }, MediaKeys.VOLUME_UP, state, compact || isWifi, onAction, Modifier.weight(1f).fillMaxHeight())
                     }
-                    Text(
-                        "Controls your PC's active media player",
-                        color = PanelMuted,
-                        fontSize = if (compact) 9.sp else 11.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+                    Row(
+                        Modifier.fillMaxWidth().then(if (isWifi) Modifier.height(if (compact) 40.dp else 52.dp) else Modifier.weight(1f)),
+                        horizontalArrangement = Arrangement.spacedBy(gap),
+                    ) {
+                        if (isWifi && nowPlaying.available) {
+                            MediaCommandKey("|◀", "Previous", "PREVIOUS", state.isConnected && nowPlaying.canPrevious,
+                                compact, { onMedia("previous", 0L, false, "off") }, Modifier.weight(1f).fillMaxHeight())
+                            MediaCommandKey(if (nowPlaying.playing) "Ⅱ" else "▶", "Play / Pause",
+                                if (nowPlaying.playing) "PAUSE" else "PLAY",
+                                state.isConnected && if (nowPlaying.playing) nowPlaying.canPause else nowPlaying.canPlay,
+                                compact, { onMedia(if (nowPlaying.playing) "pause" else "play", 0L, false, "off") },
+                                Modifier.weight(1.4f).fillMaxHeight(), accent = true)
+                            MediaCommandKey("▶|", "Next", "NEXT", state.isConnected && nowPlaying.canNext,
+                                compact, { onMedia("next", 0L, false, "off") }, Modifier.weight(1f).fillMaxHeight())
+                            MediaCommandKey("■", "Stop", "STOP", state.isConnected && nowPlaying.canStop,
+                                compact, { onMedia("stop", 0L, false, "off") }, Modifier.weight(1f).fillMaxHeight())
+                        } else {
+                            MediaPanelKey("|◀", "Previous", "PREVIOUS", MediaKeys.PREVIOUS, state, compact, onAction, Modifier.weight(1f).fillMaxHeight())
+                            MediaPanelKey("▶ / Ⅱ", "Play / Pause", "PLAY / PAUSE", MediaKeys.PLAY_PAUSE, state, compact, onAction, Modifier.weight(1.4f).fillMaxHeight(), accent = true)
+                            MediaPanelKey("▶|", "Next", "NEXT", MediaKeys.NEXT, state, compact, onAction, Modifier.weight(1f).fillMaxHeight())
+                            MediaPanelKey("■", "Stop", "STOP", MediaKeys.STOP, state, compact, onAction, Modifier.weight(1f).fillMaxHeight())
+                        }
+                    }
+                    if (isWifi && nowPlaying.available && (nowPlaying.canShuffle || nowPlaying.canRepeat)) {
+                        Row(Modifier.fillMaxWidth().height(if (compact) 26.dp else 30.dp), horizontalArrangement = Arrangement.spacedBy(gap)) {
+                            if (nowPlaying.canShuffle) {
+                                MediaCommandKey(if (nowPlaying.shuffle) "SHUFFLE ON" else "SHUFFLE", "Shuffle", null,
+                                    state.isConnected, true, { onMedia("shuffle", 0L, !nowPlaying.shuffle, "off") },
+                                    Modifier.weight(1f).fillMaxHeight(), accent = nowPlaying.shuffle)
+                            }
+                            if (nowPlaying.canRepeat) {
+                                val nextMode = when (nowPlaying.repeat) { "off" -> "all"; "all" -> "one"; else -> "off" }
+                                MediaCommandKey(when (nowPlaying.repeat) { "all" -> "REPEAT ALL"; "one" -> "REPEAT ONE"; else -> "REPEAT OFF" },
+                                    "Repeat", null, state.isConnected, true, { onMedia("repeat", 0L, false, nextMode) },
+                                    Modifier.weight(1f).fillMaxHeight(), accent = nowPlaying.repeat != "off")
+                            }
+                        }
+                    } else if (!isWifi) {
+                        Text(
+                            "Controls your PC's active media player",
+                            color = PanelMuted,
+                            fontSize = if (compact) 9.sp else 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MediaCommandKey(
+    label: String,
+    description: String,
+    secondary: String?,
+    enabled: Boolean,
+    compact: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier,
+    accent: Boolean = false,
+) {
+    val shape = RoundedCornerShape(if (compact) 6.dp else 8.dp)
+    Box(modifier.clip(shape).background(if (accent) Color(0xFF2C443E) else PanelKeyFace)
+        .border(1.dp, PanelOutline, shape)
+        .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+        .semantics { contentDescription = "Media $description" }
+        .padding(horizontal = 4.dp, vertical = 2.dp), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(label, color = (if (accent) PanelAccent else PanelIvory).copy(alpha = if (enabled) 1f else 0.35f),
+                fontSize = if (label.length > 5) 9.sp else if (compact) 18.sp else 23.sp,
+                fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (secondary != null) {
+                Text(secondary, color = PanelMuted.copy(alpha = if (enabled) 1f else 0.4f),
+                    fontSize = 8.sp, lineHeight = 9.sp, maxLines = 1)
             }
         }
     }

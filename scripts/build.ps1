@@ -36,7 +36,8 @@ try {
     $env:PATH = "$env:JAVA_HOME\bin;$env:ANDROID_HOME\platform-tools;$buildPath"
     Push-Location $projectRoot
     try {
-        & "$projectRoot\gradlew.bat" --console=plain @Tasks
+        # Avoid transform-cache rename locks from file watching on Windows.
+        & "$projectRoot\gradlew.bat" --console=plain --no-watch-fs @Tasks
         if ($LASTEXITCODE -ne 0) { throw "Gradle failed with exit code $LASTEXITCODE." }
     } finally {
         Pop-Location

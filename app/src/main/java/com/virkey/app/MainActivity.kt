@@ -28,6 +28,8 @@ import com.virkey.app.bluetooth.BluetoothInputService
 import com.virkey.app.ui.RemoteAction
 import com.virkey.app.ui.RemoteUiState
 import com.virkey.app.ui.VirkeyScreen
+import com.virkey.app.ui.ConnectionMode
+import com.virkey.app.network.WifiController
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -39,6 +41,10 @@ class MainActivity : ComponentActivity() {
     private var pendingAction: RemoteAction? = null
     private var pairingJob: Job? = null
     private var acceptsInput = false
+    private val wifiController by lazy { WifiController() }
+    private var connectionMode by mutableStateOf(ConnectionMode.BLUETOOTH)
+    private var pendingWifiAddress = ""
+    private var pendingWifiPin = ""
 
     private val permissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         inputService?.controller?.refreshEnvironment()
@@ -75,9 +81,44 @@ class MainActivity : ComponentActivity() {
         bound = bindService(Intent(this, BluetoothInputService::class.java), connection, Context.BIND_AUTO_CREATE)
         setContent {
             val service = inputService
-            val state = if (service != null) service.controller.state.collectAsStateWithLifecycle().value
+            val bluetoothState = if (service != null) service.controller.state.collectAsStateWithLifecycle().value
                 else RemoteUiState(statusMessage = "Opening keyboard…")
-            VirkeyScreen(state, ::handleAction)
+            val wifiState by wifiController.state.collectAsStateWithLifecycle()
+            val state = if (connectionMode == ConnectionMode.BLUETOOTH) bluetoothState else RemoteUiState(
+                permissionsReady = true, bluetoothEnabled = true, isSupported = true, isRegistered = true,
+                isConnected = wifiState.isConnected, connectedName = wifiState.hostName.ifBlank { "Wi-Fi PC" },
+                statusMessage = wifiState.status, capsLock = wifiState.capsLock, numLock = wifiState.numLock,
+                locksKnown = wifiState.ledsKnown,
+            )
+            VirkeyScreen(
+                state = state,
+                connectionMode = connectionMode,
+                wifiState = wifiState,
+                onModeChange = ::changeConnectionMode,
+                onWifiConnect = { address, pin ->
+                    pendingWifiAddress = address
+                    pendingWifiPin = pin
+                    wifiController.connect(address, pin)
+                },
+                onWifiTrust = {
+                    wifiController.state.value.pendingFingerprint?.let { fingerprint ->
+                        if (pendingWifiPin.isNotEmpty()) {
+                            wifiController.connect(pendingWifiAddress, pendingWifiPin, fingerprint)
+                            pendingWifiPin = ""
+                        }
+                    }
+                },
+                onWifiDisconnect = { pendingWifiPin = ""; wifiController.disconnect() },
+                onWifiDiscover = { wifiController.discover() },
+                onMedia = { command, position, enabled, mode ->
+                    if (acceptsInput && connectionMode == ConnectionMode.WIFI) {
+                        // Bind commands to the displayed track, not a newer unseen track.
+                        val media = wifiState.nowPlaying
+                        wifiController.media(command, media.sessionId, media.trackId, position, enabled, mode)
+                    }
+                },
+                onAction = ::handleAction,
+            )
         }
     }
 
@@ -91,11 +132,14 @@ class MainActivity : ComponentActivity() {
         acceptsInput = false
         pairingJob?.cancel()
         inputService?.controller?.releaseAll()
+        pendingWifiPin = ""
+        wifiController.disconnect()
         super.onPause()
     }
 
     override fun onDestroy() {
         pairingJob?.cancel()
+        wifiController.close()
         if (bound) unbindService(connection)
         inputService = null
         super.onDestroy()
@@ -109,6 +153,10 @@ class MainActivity : ComponentActivity() {
                 is RemoteAction.MovePointer, is RemoteAction.Scroll -> true
                 else -> false
             }) return
+        if (connectionMode == ConnectionMode.WIFI) {
+            if (action == RemoteAction.Disconnect) wifiController.disconnect() else wifiController.send(action)
+            return
+        }
         val service = inputService
         if (service == null) {
             // Only setup actions may wait for service binding. Never replay stale input.
@@ -158,6 +206,17 @@ class MainActivity : ComponentActivity() {
             is RemoteAction.MouseDown -> controller.mouseDown(action.button)
             is RemoteAction.MouseUp -> controller.mouseUp(action.button)
         }
+    }
+
+    private fun changeConnectionMode(mode: ConnectionMode) {
+        if (mode == connectionMode) return
+        pairingJob?.cancel()
+        pendingAction = null
+        pendingWifiPin = ""
+        wifiController.disconnect()
+        inputService?.controller?.releaseAll()
+        if (connectionMode == ConnectionMode.BLUETOOTH) inputService?.controller?.disconnect()
+        connectionMode = mode
     }
 
     private fun ensureBluetoothReady(action: RemoteAction): Boolean {

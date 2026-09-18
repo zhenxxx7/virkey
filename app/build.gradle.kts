@@ -12,8 +12,8 @@ android {
         applicationId = "com.virkey.app"
         minSdk = 28
         targetSdk = 36
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = 3
+        versionName = "0.3.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -44,6 +44,12 @@ android {
 
 kotlin {
     jvmToolchain(17)
+}
+
+// Robolectric's Conscrypt provider reads socket host metadata through java.net.
+// This is needed only by desktop JVM TLS tests; it does not affect the Android APK.
+tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
+    jvmArgs("--add-opens=java.base/java.net=ALL-UNNAMED")
 }
 
 dependencies {

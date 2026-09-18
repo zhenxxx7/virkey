@@ -1,32 +1,83 @@
-# Virkey 0.2.0 test-build validation
+# Virkey 0.3.0 local test-build validation
 
-Built on Windows on 2026-09-10 using the project-local JDK and Android SDK after the user authorized Google's SDK license acceptance.
+Built on Windows on 2026-09-18. Bluetooth remains the default; optional Wi-Fi
+input and Windows media preview require the portable Windows host. USB is not
+included. Source and release assets are published as v0.3.0.
 
 ## Completed
 
-- `scripts/build.ps1`: `assembleDebug`, `testDebugUnitTest`, and `lintDebug` succeeded.
-- 71 automated tests passed with no failures: 34 HID/key-layout/media tests, 19 trackpad-gesture tests, six mouse-button ownership tests, and 12 Compose UI tests.
-- UI checks ran with Robolectric at Android API 35 in 1280 × 800 dp and 960 × 600 dp landscape configurations. They verify key/media press/release, disabled disconnected input, pairing availability before HID registration, deck switching, long-press timer/drag/cancellation, pause/resume safety, trackpad placement, and the watermark/removed side text.
-- Both actual Compose decks were rendered through Android's native Canvas and visually inspected. These previews use a simulated connected state, not a live PC connection.
-- Android lint: zero errors and 12 warnings. Warnings concern available dependency upgrades, Android 16's treatment of orientation requests, backup configuration guidance, and Kotlin style; no missing-permission or API-compatibility errors were reported.
-- APK signature verified with Android `apksigner` (v2 signing, one signer).
-- Packaged APK inspected: application `com.virkey.app`, version `0.2.0` (version code 2), minimum API 28, target API 36. It requests Bluetooth/session/notification permissions and no Internet, location, or accessibility-service permissions.
+- Android `assembleDebug`, `testDebugUnitTest`, and `lintDebug` succeeded using
+  the project-local JDK 17 and Android SDK.
+- 111 automated Android tests passed: 34 HID/layout tests, 19 trackpad gesture
+  tests, six mouse-button ownership tests, 26 Compose UI tests, and 26 network
+  tests. Seven network tests use real loopback TLS sockets.
+- Network checks cover certificate inspection without sending a PIN, explicit
+  fingerprint pinning, wrong-certificate rejection, authentication failures,
+  ordered input/media commands, heartbeat scheduling, reconnect queue clearing,
+  bounded framing/artwork decoding, and track/capability validation.
+- UI checks cover Bluetooth regression behavior, transport switching and
+  releases, pairing cancellation, discovery, media metadata/artwork clearing,
+  seeking, disabled unsupported controls, and avoiding duplicate HID/media
+  commands. Unknown Wi-Fi lock feedback uses neutral indicators.
+- Actual Compose views were rendered using Android's native Canvas at API 35.
+  Full keyboard/media and compact panel layouts passed checks. The full media
+  view and artwork panel were visually inspected; screenshots use test fixtures,
+  not proof of a real tablet connection.
+- Android lint: zero errors, 13 warnings. Warnings include dependency upgrades,
+  orientation/backup guidance, Kotlin style, and the custom certificate trust
+  manager. The latter is intentional for a user-confirmed self-signed host:
+  inspection sends no PIN; the authenticated connection pins the complete
+  SHA-256 certificate fingerprint. It is covered by loopback tests, not an
+  independent security audit.
+- APK signature verified: v2 signing, one Android development signer. Package
+  `com.virkey.app`, version `0.3.0` (code 3), minimum API 28, target API 36.
+  Internet permission supports local Wi-Fi; Bluetooth/session/notification
+  permissions remain. No location or accessibility-service permission.
+- Windows x64 self-contained single-file EXE published successfully with the
+  project-local .NET 8 SDK. Six self-test groups passed, including actual TLS
+  pairing, PIN rate limiting, second-client isolation, held-input release,
+  rapid key re-press/repeat, disconnect/reset/stop, and heartbeat timeout.
+  All injected events went to a recording sink, not the user's desktop.
+- Read-only Windows media smoke test read a real Spotify session with artwork
+  and playback timing. It did not send playback commands or keyboard/mouse input.
+- Windows host form rendered and was visually inspected with example connection
+  details; preview mode did not start a network listener.
+- No firewall rules or startup entries were created.
 
-## Still requires physical-device testing
+## Still requires tablet/PC testing
 
-No Android device was connected through ADB during this build. The target tablet's Bluetooth firmware, actual Windows 11 HID enumeration, pairing/passkey behavior, reconnecting after sleep, input latency, and held-input release on a real radio disconnect have not been verified.
+No Android device was attached through ADB. Physical Bluetooth pairing, Wi-Fi
+discovery/firewall behavior, end-to-end tablet input, real-player control/seek,
+latency, reconnect/sleep, and disconnect release require the user's test.
 
-The new consumer-control HID collection changes the device descriptor. Existing Windows pairings may need to be removed and paired again for media controls to appear. Real PC tests must cover Num Lock feedback, all media controls, text selection, and moving away from the app during a pending long press.
+Wi-Fi Caps Lock / Num Lock feedback is deliberately marked unknown: Windows
+`GetKeyState` on a background thread is not reliable foreground toggle feedback.
+The keys still work; check the PC's state if the keypad sends navigation instead
+of numbers. Bluetooth LED feedback is unchanged.
 
-Use the device acceptance checklist in [README.md](../README.md) for the first tablet/PC session. Do not interpret a passing host test or a simulated connected-state screenshot as proof of working Bluetooth hardware.
+The EXE is unsigned and may trigger a Windows reputation warning. It runs without
+administrator privileges and cannot inject input into elevated applications or
+the secure sign-in/UAC desktop. Player metadata and supported commands vary by
+application. A passing mock/loopback test is not a physical-device acceptance test.
 
-## Outputs
+Follow [the testing guide](testing-0.3.0.md) when installing.
 
-- `app/build/outputs/apk/debug/app-debug.apk`: signed development APK for tablet testing.
-- `.tools/release-artifacts/virkey-0.2.0-debug.apk`: named local copy; not published to GitHub by this update.
-- `app/build/outputs/previews/virkey-tablet.png`: cleaned laptop keyboard preview.
-- `app/build/outputs/previews/virkey-numpad-media.png`: number pad and media deck preview.
-- `app/build/reports/tests/testDebugUnitTest/index.html`: test report.
-- `app/build/reports/lint-results-debug.html`: full Android lint report.
+## Local outputs
 
-The build helper also normalizes stray quotes in PATH entries for its child processes, avoiding a host-specific Java test-worker launch failure. It restores the original environment when finished and does not modify the Windows PATH setting.
+- `.tools/release-artifacts/virkey-0.3.0.apk` (28,967,967 bytes)
+  - SHA-256: `4039BB2CEC4BE6DD66467378DBC67E8C9B1957CACAF8300F7CD899C7D4504805`
+- `.tools/release-artifacts/virkey-host-0.3.0.exe` (187,143,607 bytes)
+  - SHA-256: `EF7A524D32801684FD1617FD8B295B9CD8E0B451C47C9E9FCEBBD0D718EE1D05`
+- `app/build/outputs/previews/virkey-wifi-media.png`: full Wi-Fi media layout.
+- `app/build/outputs/previews/virkey-live-media.png`: artwork/media panel fixture.
+- `.tools/release-artifacts/virkey-host-preview.png`: Windows host UI fixture.
+- `app/build/reports/tests/testDebugUnitTest/index.html`: Android test report.
+- `app/build/reports/lint-results-debug.html`: Android lint report.
+- `windows/build/bin/Virkey.Host/Release/net8.0-windows10.0.19041.0/win-x64/publish/host-test-results.txt`:
+  Windows self-test report.
+- `.tools/release-artifacts/host-smoke-test.txt`: read-only real media report.
+
+Build helpers normalize inherited PATH quotes, disable Gradle file watching to
+avoid Windows transform-cache rename locks, and restore process environment
+variables on exit. Robolectric TLS tests open `java.net` reflection on the test
+JVM only; this does not change APK security settings.

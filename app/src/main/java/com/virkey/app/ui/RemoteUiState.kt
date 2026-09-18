@@ -1,5 +1,7 @@
 package com.virkey.app.ui
 
+enum class ConnectionMode { BLUETOOTH, WIFI }
+
 data class RemoteDevice(val address: String, val name: String)
 
 data class RemoteUiState(
@@ -14,4 +16,5 @@ data class RemoteUiState(
     val selectedAddress: String? = null,
     val capsLock: Boolean = false,
     val numLock: Boolean = false,
+    val locksKnown: Boolean = true,
 )

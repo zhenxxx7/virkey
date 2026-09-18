@@ -19,6 +19,8 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTouchInput
 import com.virkey.app.input.MediaKeys
+import com.virkey.app.network.NowPlayingState
+import com.virkey.app.network.WifiState
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
@@ -81,6 +83,53 @@ class VirkeyScreenTest {
         compose.setContent { VirkeyScreen(connected, actions::add) }
         compose.onNodeWithContentDescription("A").performTouchInput { click() }
         compose.runOnIdle { assertEquals(listOf(RemoteAction.KeyDown(0x04), RemoteAction.KeyUp(0x04)), actions) }
+    }
+
+    @Test fun changingTransportReleasesInputBeforeChangingMode() {
+        val events = mutableListOf<String>()
+        compose.setContent {
+            VirkeyScreen(connected, connectionMode = ConnectionMode.BLUETOOTH,
+                onModeChange = { events.add(it.name) }, onAction = { events.add(it.toString()) })
+        }
+        compose.onNodeWithTag("transport_toggle").performClick()
+        compose.runOnIdle { assertEquals(listOf("ReleaseAll", "WIFI"), events) }
+    }
+
+    @Test fun wifiModeUsesItsConnectionDialogWithoutBluetoothPermissions() {
+        var discoverCalls = 0
+        compose.setContent {
+            VirkeyScreen(RemoteUiState(), connectionMode = ConnectionMode.WIFI,
+                onWifiDiscover = { discoverCalls++ }, onAction = {})
+        }
+        compose.onNodeWithText("Connect to PC").performClick()
+        compose.onNodeWithText("Find PCs").performClick()
+        compose.runOnIdle { assertEquals(1, discoverCalls) }
+        compose.onNodeWithText("Allow Nearby devices").assertDoesNotExist()
+    }
+
+    @Test fun wifiMediaDeckRendersWithBluetoothOffAndSavesPreview() {
+        var renderedView: View? = null
+        val media = NowPlayingState(available = true, sessionId = "preview", trackId = "preview-track",
+            title = "Evening Session", artist = "Preview artist", album = "Sample album",
+            player = "Media player", playing = true, positionMs = 83_000L, durationMs = 245_000L,
+            canPlay = true, canPause = true, canPrevious = true, canNext = true, canSeek = true)
+        compose.setContent {
+            renderedView = LocalView.current
+            VirkeyScreen(connected.copy(bluetoothEnabled = false), connectionMode = ConnectionMode.WIFI,
+                wifiState = WifiState(isConnected = true, hostName = "Windows PC", nowPlaying = media),
+                onAction = {})
+        }
+        compose.onNodeWithTag("panel_toggle").performClick()
+        compose.onNodeWithText("Evening Session").assertIsDisplayed()
+        compose.onNodeWithTag("trackpad").assertIsDisplayed()
+        compose.runOnIdle {
+            val view = requireNotNull(renderedView)
+            val bitmap = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
+            view.draw(Canvas(bitmap))
+            val output = File("build/outputs/previews/virkey-wifi-media.png")
+            requireNotNull(output.parentFile).mkdirs()
+            output.outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        }
     }
 
     @Test fun disconnectedKeysDoNotSendInput() {
